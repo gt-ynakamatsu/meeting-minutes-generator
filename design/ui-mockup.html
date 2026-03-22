@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UI デザインモック — AI 議事録アーカイブ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: linear-gradient(165deg, #fbf9f6 0%, #eef4f0 45%, #e8f0eb 100%);
+      --card: #ffffff;
+      --text: #1b4332;
+      --muted: #5c6f64;
+      --accent: #2d6a4f;
+      --pill: #d8f3dc;
+      --border: rgba(27, 67, 50, 0.1);
+      --shadow: 0 12px 40px rgba(27, 67, 50, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Noto Sans JP", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .mock-banner {
+      background: linear-gradient(90deg, #1b4332, #40916c);
+      color: #ecfdf5;
+      text-align: center;
+      padding: 0.5rem 1rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .mock-banner span { opacity: 0.9; font-weight: 400; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) 1fr;
+      gap: 1.25rem;
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 1.25rem;
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .hero-row {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 1.25rem;
+      align-items: center;
+      background: var(--card);
+      border-radius: 20px;
+      padding: 1.35rem 1.6rem;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+    .hero-row img { width: 72px; height: 72px; display: block; }
+    .pill {
+      display: inline-block;
+      background: var(--pill);
+      color: var(--text);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      margin-right: 0.3rem;
+    }
+    .hero-row h1 {
+      margin: 0.3rem 0 0.4rem;
+      font-size: 1.55rem;
+      letter-spacing: -0.02em;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.65;
+      margin: 0;
+    }
+    .sidebar {
+      background: linear-gradient(180deg, #f7faf8 0%, #eef5f1 100%);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1rem 1rem 1.15rem;
+    }
+    .sidebar h3 {
+      margin: 0.65rem 0 0.3rem;
+      font-size: 0.88rem;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .sidebar label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin: 0.35rem 0 0.15rem;
+    }
+    .fake-input, .sidebar select, .sidebar textarea {
+      width: 100%;
+      padding: 0.42rem 0.5rem;
+      border-radius: 8px;
+      border: 1px dashed rgba(45, 106, 79, 0.35);
+      background: rgba(255, 255, 255, 0.75);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .sidebar textarea { min-height: 52px; resize: none; }
+    details.mock-details {
+      margin-top: 0.4rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .btn-mock {
+      width: 100%;
+      margin-top: 0.65rem;
+      padding: 0.62rem;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: default;
+      opacity: 0.92;
+    }
+    .main h2 {
+      color: var(--accent);
+      font-size: 1.05rem;
+      margin: 0 0 0.5rem;
+    }
+    .queue {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.88rem;
+      box-shadow: var(--shadow);
+    }
+    .queue ul { margin: 0.35rem 0 0; padding-left: 1.2rem; color: var(--muted); }
+    .filters {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    @media (max-width: 700px) {
+      .filters { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.55rem;
+      box-shadow: 0 4px 18px rgba(27, 67, 50, 0.04);
+    }
+    .card .card-title {
+      font-weight: 600;
+      font-size: 0.88rem;
+      margin: 0;
+    }
+    .card .meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin: 0.4rem 0;
+    }
+    .tabs-mock {
+      display: flex;
+      gap: 0.35rem;
+      margin: 0.5rem 0;
+    }
+    .tabs-mock span {
+      padding: 0.3rem 0.55rem;
+      border-radius: 8px;
+      font-size: 0.78rem;
+      background: #f4faf6;
+      border: 1px solid var(--border);
+    }
+    .tabs-mock span.on {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .minutes-mock h4 {
+      margin: 0.45rem 0 0.2rem;
+      font-size: 0.82rem;
+      color: var(--accent);
+    }
+    .minutes-mock ul { margin: 0.2rem 0; padding-left: 1.1rem; font-size: 0.85rem; color: var(--text); }
+    .footer-mock {
+      text-align: center;
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding: 1rem;
+    }
+    .wire-note {
+      border-left: 3px solid #95d5b2;
+      padding-left: 0.65rem;
+      margin: 0.5rem 0 0;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="mock-banner">
+    デザインモック（静的 HTML）<span> — Docker / Node 不要 · 本番 UI は React と同系トーン</span>
+  </div>
+
+  <div class="layout">
+    <header class="hero-row">
+      <img src="../assets/svg/logo.svg" alt="" width="72" height="72" />
+      <div>
+        <span class="pill">社内利用</span>
+        <span class="pill">GPU 対応</span>
+        <h1>AI 議事録アーカイブ</h1>
+        <p class="muted">
+          動画・音声、または文字起こし済みテキスト・SRT から議事録を作成。左で会議の背景を入れてからファイルを送ると、抽出のブレが減りやすい想定のレイアウトです。
+        </p>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <h3>会議情報</h3>
+      <label>議題（任意）</label>
+      <div class="fake-input">四半期レビュー（サンプル）</div>
+      <label>開催日・目安</label>
+      <div class="fake-input">2025-03-22</div>
+      <label>分類</label>
+      <select disabled><option>社内</option></select>
+      <label>タグ</label>
+      <div class="fake-input">プロダクト, 定例</div>
+      <label>会議タイププリセット</label>
+      <select disabled><option>定例・スタンドアップ (standup)</option></select>
+
+      <details class="mock-details" open>
+        <summary>精度向上用コンテキスト（折りたたみ）</summary>
+        <label>会議の目的</label>
+        <textarea readonly>次スプリントのスコープとリスクを合意する</textarea>
+        <label>参加者・役割</label>
+        <textarea readonly>山田（PM）／佐藤（開発）</textarea>
+      </details>
+
+      <h3>解析設定</h3>
+      <label>AI の接続先</label>
+      <select disabled><option>ローカル（Ollama）</option></select>
+      <label>Ollama モデル名</label>
+      <div class="fake-input">qwen2.5:7b</div>
+
+      <h3>通知</h3>
+      <select disabled><option>ブラウザ</option></select>
+
+      <h3>ファイル</h3>
+      <div class="fake-input" style="padding: 1.2rem; text-align: center;">
+        📎 meeting_20250322.m4a（ドラッグ＆ドロップ想定）
+      </div>
+      <p class="wire-note">実装では type=file。ここは見た目の置き場所のイメージです。</p>
+
+      <button type="button" class="btn-mock">解析をキューに追加</button>
+    </aside>
+
+    <main class="main">
+      <h2>処理キュー</h2>
+      <div class="queue">
+        <strong style="color: var(--text);">待機・実行中</strong>
+        <ul>
+          <li><strong>キックオフ</strong> · kickoff.m4a · <code>processing:transcribing</code></li>
+          <li><strong>（議題なし）</strong> · notes.txt · <code>pending</code></li>
+        </ul>
+      </div>
+
+      <h2>議事録アーカイブ</h2>
+      <div class="filters">
+        <div class="fake-input">キーワード検索…</div>
+        <select disabled><option>（すべて）</option></select>
+        <select disabled><option>完了</option></select>
+      </div>
+
+      <article class="card">
+        <p class="card-title">2025-03-20 14:05 · 四半期レビュー · Q1_review.mp4 · completed</p>
+        <p class="meta">分類: 社内 ／ タグ: 経営 ／ プリセット: decision ／ 日付: 2025-03-20</p>
+        <div class="tabs-mock">
+          <span class="on">プレビュー</span>
+          <span>手直し・保存</span>
+          <span>書き起こし</span>
+        </div>
+        <div class="minutes-mock">
+          <h4>決定事項</h4>
+          <ul>
+            <li>次四半期の優先テーマを A・B・C の順で進める。</li>
+          </ul>
+          <h4>アクション</h4>
+          <ul>
+            <li>[ ] <strong>山田</strong>: 詳細スケジュール案を共有（期限: 3/25）</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="card">
+        <p class="card-title">2025-03-18 10:00 · （議題なし） · broken.srt · Error: …</p>
+        <p class="meta" style="color: #991b1b;">エラー時はトラブルシューティングを折りたたみで出す想定</p>
+      </article>
+    </main>
+  </div>
+
+  <p class="footer-mock">Meeting Minutes Generator · UI mock · 参照: frontend/src/styles.css と同色トークン</p>
+</body>
+</html>

@@ -1,0 +1,212 @@
+:root {
+  --bg: linear-gradient(165deg, #fbf9f6 0%, #eef4f0 45%, #e8f0eb 100%);
+  --card: #ffffff;
+  --text: #1b4332;
+  --muted: #5c6f64;
+  --accent: #2d6a4f;
+  --pill: #d8f3dc;
+  --border: rgba(27, 67, 50, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Noto Sans JP", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) 1fr;
+  gap: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hero {
+  grid-column: 1 / -1;
+  background: var(--card);
+  border-radius: 20px;
+  padding: 1.5rem 1.75rem;
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 40px rgba(27, 67, 50, 0.06);
+}
+
+.pill {
+  display: inline-block;
+  background: var(--pill);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  margin-right: 0.35rem;
+}
+
+.hero h1 {
+  margin: 0.35rem 0 0.5rem;
+  letter-spacing: -0.02em;
+}
+
+.muted {
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.sidebar {
+  background: linear-gradient(180deg, #f7faf8 0%, #eef5f1 100%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1rem 1.1rem;
+  height: fit-content;
+}
+
+.sidebar h3 {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.95rem;
+  color: var(--accent);
+}
+
+.sidebar label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0.35rem 0 0.2rem;
+  color: var(--muted);
+}
+
+.sidebar input,
+.sidebar select,
+.sidebar textarea {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font: inherit;
+}
+
+.sidebar textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.sidebar details {
+  margin-top: 0.5rem;
+  font-size: 0.88rem;
+}
+
+.btn-primary {
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.65rem 1rem;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.main h2 {
+  color: var(--accent);
+  margin-top: 0;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 720px) {
+  .filters {
+    grid-template-columns: 1fr;
+  }
+}
+
+.filters input,
+.filters select {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.65rem;
+}
+
+.card summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+
+.tabs button {
+  border: 1px solid var(--border);
+  background: #f4faf6;
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tabs button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.minutes-json h4 {
+  margin: 0.5rem 0 0.25rem;
+  color: var(--accent);
+}
+
+.error-box {
+  color: #7f1d1d;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  padding: 0.65rem;
+  border-radius: 10px;
+  font-size: 0.9rem;
+}
+
+.footer {
+  grid-column: 1 / -1;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.queue {
+  font-size: 0.9rem;
+}
