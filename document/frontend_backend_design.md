@@ -58,7 +58,7 @@ flowchart LR
 
 | サービス | イメージ / ビルド | 役割 |
 |----------|-------------------|------|
-| `frontend` | `Dockerfile.frontend` | Nginx + `frontend/dist`、`:8085` で公開 |
+| `frontend` | `frontend/Dockerfile` | Nginx + `frontend/dist`、`:8085` で公開 |
 | `api` | `Dockerfile.api` | FastAPI（`requirements-api.txt` のみ） |
 | `worker` | 既存 `Dockerfile` | GPU・Whisper・MoviePy・LLM 呼び出し |
 | `redis` | `redis:alpine` | Celery ブローカー |
@@ -129,7 +129,8 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **技術**: React 18、Vite 5、TypeScript、`react-markdown`（JSON でない要約の表示用）。
 - **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
-- **管理者画面**: `GET /api/auth/me` で `is_admin` が真のときヘッダに「管理者」を表示。一覧・追加・パスワード再設定・管理者ロール切替・削除（制約は API と同じ）。
+- **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
+- **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・OpenAI（サーバ保存キー）等。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
 - **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。
 
 ---
@@ -188,3 +189,4 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.1 | 2025-03-22 | 環境変数・ハードコード方針（§11） |
 | 1.2 | 2026-03-23 | 初回セットアップ・ログイン・管理者 API／画面、`registry.users.is_admin`（§5・§6・§7） |
 | 1.3 | 2026-03-23 | `POST /api/auth/register`・`self_register_allowed`・`MM_AUTH_SELF_REGISTER` |
+| 1.4 | 2026-03-23 | 物理構成の `frontend/Dockerfile` 表記修正。§6 にアカウントドロップダウン・設定ドロワー「一般／ユーザー・権限」タブ・管理者権限 UI を反映 |

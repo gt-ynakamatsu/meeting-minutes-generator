@@ -2,10 +2,10 @@
 
 動画や音声ファイルをアップロードするだけで、AIが自動で文字起こしを行い、**構造化された詳細な議事録（Markdown形式）**を作成・アーカイブする社内専用アプリケーションです。
 
-## ✨ 主な機能
+## 主な機能
 
 *   **高品質AI議事録**: 「分割(Chunk) → 抽出(Extract) → 統合(Merge)」の3段階パイプラインを採用。長時間の会議でも文脈を見失わず、決定事項・課題・ネクストアクションを漏れなく抽出します。
-*   **構造化フォーマット**: 議事録はMarkdown形式で出力され、「決定事項(💡)」「課題(⚠️)」「アクション(🚀)」「重要メモ(📌)」に分類されます。
+*   **構造化フォーマット**: 議事録は Markdown 形式で出力され、決定事項・課題・アクション・重要メモに分類されます。
 *   **マルチフォーマット対応**: 動画/音声ファイルだけでなく、SRT（字幕ファイル）やテキストファイルからの議事録作成もサポートしています。
 *   **自動文字起こし**: OpenAI製の高性能音声認識モデル [Faster Whisper](https://github.com/guillaumekln/faster-whisper) を使用し、GPU活用で高速・高精度にテキスト化します。
 *   **アーカイブ機能**: 過去の議事録をデータベースに保存し、ブラウザ上で閲覧・Markdown形式 (`.md`) でのダウンロードが可能です。
@@ -20,13 +20,13 @@
 *   **フロント／API 分離**: UI は **React（`frontend/`）**、HTTP API は **FastAPI（`backend/`）**。構成・エンドポイントは **[設計書 `document/frontend_backend_design.md`](document/frontend_backend_design.md)** を参照。
 *   **UI デザインモック（静的）**: Docker なしで確認する場合は **`design/ui-mockup.html`** をブラウザで開く（Windows は `design/open-mockup.bat`）。
 
-## 🛠️ 前提条件
+## 前提条件
 
 *   **Docker** および **Docker Compose**（`docker compose` コマンドが使えること）
 *   **NVIDIA GPU**（推奨: VRAM 8GB 以上）— **worker**（Whisper 等）用。**Ollama** は別途 Docker 等で起動し、本リポジトリの Compose では立てません
 *   **NVIDIA Container Toolkit**（コンテナから GPU を使うため）
 
-## 🚀 セットアップと起動方法
+## セットアップと起動方法
 
 ### 1. リポジトリの取得
 ```bash
@@ -112,7 +112,7 @@ docker exec ollama-server ollama pull qwen2.5:7b
 
 `frontend/nginx.conf` の `api:8000` や Compose のサービス名 **`redis`** は **コンテナ間の DNS 名**であり、特定の実サーバー名を直書きしているわけではありません。
 
-## 💻 ローカルパイプライン (上級者向け)
+## ローカルパイプライン (上級者向け)
 
 Webアプリを使わず、コマンドラインから議事録を作成することも可能です。長時間動画のバッチ処理や、音声認識済みのSRTファイルを利用する場合に便利です。
 
@@ -136,7 +136,7 @@ python3 03_merge.py
 ```
 結果は `output/final_minutes.md` に出力されます。
 
-## 📂 ディレクトリ構成
+## ディレクトリ構成
 
 *   `app.py`: Streamlit フロントエンド（Markdown表示・DL機能付き）
 *   `tasks.py`: AI議事録生成パイプライン（Celeryワーカー）
@@ -145,5 +145,5 @@ python3 03_merge.py
 *   `prompt_merge.txt`: 統合フェーズ用プロンプト
 *   `archive/`: 古いバージョンのコード
 
-## 🗑️ 環境の削除
+## 環境の削除
 `cleanup.bat` (Windows) または `cleanup.sh` (Linux) を実行すると、データベースやログを含むすべてのデータを削除して初期化できます。
