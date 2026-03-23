@@ -1,3 +1,8 @@
+# worker と同一 Dockerfile のサービスを2つ書くと、ビルドコンテキストが二重に送られる。
+# 同じイメージなら worker だけ build + image を付け、もう一方は image のみにするとよい。
+#
+# ビルドログで #7 [worker] / #8 [api] が交互に出るのは「並列ビルド」でありループではない。
+# 転送が数百 MB のままなら、サーバのプロジェクト直下に .dockerignore が無い／古い可能性が高い。
 services:
   api:
     build:
@@ -8,6 +13,12 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - WEBHOOK_URL=${WEBHOOK_URL:-YOUR_WEBHOOK_URL_HERE}
       - CORS_ORIGINS=${MM_CORS_ORIGINS:-http://localhost:8085,http://127.0.0.1:8085,http://localhost:5173}
+      # 未指定時はフォールバックで認証 ON（ユーザー別 data/user_data/<slug>/minutes.db）。本番は MM_AUTH_SECRET を openssl rand -hex 32 等で必ず差し替え。
+      - MM_AUTH_SECRET=${MM_AUTH_SECRET:-meet-minutes-default-jwt-hs256-key-change-in-production-use-openssl-rand-hex-32}
+      - MM_BOOTSTRAP_ADMIN_USER=${MM_BOOTSTRAP_ADMIN_USER:-}
+      - MM_BOOTSTRAP_ADMIN_PASSWORD=${MM_BOOTSTRAP_ADMIN_PASSWORD:-}
+      - MM_AUTH_TOKEN_HOURS=${MM_AUTH_TOKEN_HOURS:-168}
+      - MM_AUTH_SELF_REGISTER=${MM_AUTH_SELF_REGISTER:-1}
     volumes:
       - ./data:/app/data
       - ./downloads:/app/downloads
@@ -18,8 +29,8 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: mm-frontend
     ports:
       - "${MM_FRONTEND_PORT:-8085}:80"
@@ -27,7 +38,9 @@ services:
       - api
 
   worker:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: whisper-worker
     deploy:
       resources:

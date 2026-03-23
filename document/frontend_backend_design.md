@@ -4,7 +4,7 @@
 
 - **目的**: UI（フロントエンド）と HTTP API・ジョブ投入（バックエンド）を分離し、開発・デプロイ・スケールの単位を明確にする。
 - **スコープ**: 既存の Celery ワーカー（GPU・Whisper・LLM 処理）、SQLite（`database.py`）、プロンプト資産は維持し、**画面と REST API を追加**する。
-- **非スコープ（現時点）**: 認証・多テナント、S3 等へのストレージ移行、PostgreSQL 化。
+- **非スコープ（現時点）**: 多テナントの厳密分離以外の大規模 IAM、S3 等へのストレージ移行、PostgreSQL 化。
 
 ---
 
@@ -100,6 +100,16 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | PATCH | `/api/records/{task_id}/summary` | 議事録本文の手動上書き `{ "summary": "..." }` |
 | GET | `/api/records/{task_id}/export/minutes` | 議事録を `text/markdown` でダウンロード（長大本文用・data URL 回避） |
 | GET | `/api/records/{task_id}/export/transcript` | 書き起こし全文を `text/plain` でダウンロード |
+| GET | `/api/auth/status` | `{ auth_required, bootstrap_needed, self_register_allowed }`（`MM_AUTH_SECRET` 未設定時は `auth_required: false`。`self_register_allowed` は 1 人目作成後かつ `MM_AUTH_SELF_REGISTER` 許可時に真） |
+| POST | `/api/auth/bootstrap` | 初回のみ（registry のユーザー数が 0）。`{ username, password }` で最初の **管理者** を作成し JWT を返す |
+| POST | `/api/auth/register` | ユーザーが 1 人以上いるとき、自己登録で **一般ユーザー** を追加し JWT を返す（`MM_AUTH_SELF_REGISTER=0` で無効） |
+| POST | `/api/auth/login` | `{ username, password }` → JWT |
+| GET | `/api/auth/me` | Bearer 必須（認証オフ時は `username: ""`）。`{ username, is_admin }` |
+| GET | `/api/admin/users` | **管理者のみ**。ユーザー一覧（パスワードは含まない） |
+| POST | `/api/admin/users` | **管理者のみ**。`{ username, password, is_admin }` でユーザ追加 |
+| PATCH | `/api/admin/users/{username}/password` | **管理者のみ**。`{ new_password }` |
+| PATCH | `/api/admin/users/{username}/role` | **管理者のみ**。`{ is_admin }`（最後の管理者の降格は不可） |
+| DELETE | `/api/admin/users/{username}` | **管理者のみ**。自分自身・最後の管理者は不可 |
 
 ### 5.1 `POST /api/tasks` の `metadata`（JSON）
 
@@ -118,6 +128,8 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 - **技術**: React 18、Vite 5、TypeScript、`react-markdown`（JSON でない要約の表示用）。
 - **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。
+- **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
+- **管理者画面**: `GET /api/auth/me` で `is_admin` が真のときヘッダに「管理者」を表示。一覧・追加・パスワード再設定・管理者ロール切替・削除（制約は API と同じ）。
 - **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。
 
 ---
@@ -125,8 +137,8 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 ## 7. セキュリティ・運用上の注意
 
 - **API キー**: フロントから OpenAI キーを送る設計のため、**HTTPS 必須**の本番運用を推奨。社内 VPN 内のみの利用を前提とする。
-- **認証**: 現状なし。外向き公開する場合は API キー、OAuth2、IP 制限などを別途設計すること。
-- **CORS**: `CORS_ORIGINS` 環境変数（カンマ区切り）。開発時は `http://localhost:5173` を含める。
+- **認証**: `MM_AUTH_SECRET`（十分に長いランダム文字列）を設定すると JWT 認証が有効。初回は **ユーザー 0 件のときだけ** `POST /api/auth/bootstrap` または `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` で最初の管理者を作成可能。外向き公開する場合は HTTPS・IP 制限・WAF 等と併用すること。
+- **CORS**: `CORS_ORIGINS` 環境変数（カンマ区切り）。開発時は `http://localhost:5173` を含める。LAN の IP でフロントにアクセスする場合は当該オリジンも列挙する。
 - **アップロード上限**: Nginx `client_max_body_size 2000m`（従来 Streamlit 設定に合わせた目安）。
 
 ---
@@ -150,7 +162,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 ## 10. 今後の拡張候補
 
 - OpenAPI クライアント生成（TypeScript）で型を API と完全同期
-- JWT / Session によるログイン
+- OAuth2 / SSO 連携
 - タスク結果の WebSocket / SSE プッシュ（ポーリング廃止）
 - API とワーカーでオブジェクトストレージ経由のファイル受け渡し
 
@@ -174,3 +186,5 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 |----|------|------|
 | 1.0 | 2025-03-22 | 初版（FE/BE 分離、Compose、API 一覧、Celery 分離方針） |
 | 1.1 | 2025-03-22 | 環境変数・ハードコード方針（§11） |
+| 1.2 | 2026-03-23 | 初回セットアップ・ログイン・管理者 API／画面、`registry.users.is_admin`（§5・§6・§7） |
+| 1.3 | 2026-03-23 | `POST /api/auth/register`・`self_register_allowed`・`MM_AUTH_SELF_REGISTER` |

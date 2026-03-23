@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -8,12 +10,37 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+import bcrypt
 from pydantic import ValidationError
 
 import database as db
 from celery_app import celery_app
-from backend.schemas import SummaryPatch, TaskSubmitMetadata
+from backend.auth_jwt import create_access_token
+from backend.auth_settings import auth_enabled, self_register_enabled
+from backend.deps import AdminUser, ApiUser
+from backend.schemas import (
+    AdminCreateUserRequest,
+    AdminPasswordResetRequest,
+    AdminRolePatch,
+    AdminUserRow,
+    AuthMeResponse,
+    AuthStatusResponse,
+    BootstrapRequest,
+    LoginRequest,
+    MeLLMPatch,
+    MeLLMResponse,
+    SummaryPatch,
+    TaskSubmitMetadata,
+    TokenResponse,
+)
 from backend.storage import save_uploaded_prompts
+
+
+def _verify_password(raw: str, stored_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(raw.encode("utf-8"), stored_hash.encode("ascii"))
+    except (ValueError, TypeError):
+        return False
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
@@ -34,6 +61,11 @@ def _content_disposition_attachment(filename: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    if not auth_enabled():
+        logging.getLogger("uvicorn.error").warning(
+            "MM_AUTH_SECRET が未設定のため認証が無効です。全利用者が同一の議事録 DB（data/minutes.db）を共有します。"
+            "ユーザー別アーカイブには MM_AUTH_SECRET を設定してください（Docker Compose 既定ではフォールバック値で認証 ON）。"
+        )
     yield
 
 
@@ -67,8 +99,193 @@ def api_version():
         return {"version": "unknown"}
 
 
+@app.get("/api/auth/status", response_model=AuthStatusResponse)
+def auth_status():
+    if not auth_enabled():
+        return AuthStatusResponse(auth_required=False, bootstrap_needed=False, self_register_allowed=False)
+    n = db.count_users()
+    return AuthStatusResponse(
+        auth_required=True,
+        bootstrap_needed=n == 0,
+        self_register_allowed=self_register_enabled() and n > 0,
+    )
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def auth_login(body: LoginRequest):
+    if not auth_enabled():
+        raise HTTPException(status_code=400, detail="認証は無効です（MM_AUTH_SECRET が未設定）")
+    if db.count_users() == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="ユーザーが未登録です。ブラウザで初回セットアップを行うか、MM_BOOTSTRAP_ADMIN_USER / MM_BOOTSTRAP_ADMIN_PASSWORD を設定して API を再起動してください。",
+        )
+    username = (body.username or "").strip()
+    # コピペや古いクライアント由来の CR を除去（パスワード先頭末尾の通常空白はそのまま）
+    password = (body.password or "").replace("\r", "")
+    row = db.get_user_by_username(username)
+    if not row or not _verify_password(password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="ユーザー名またはパスワードが正しくありません")
+    token = create_access_token(row["username"])
+    return TokenResponse(access_token=token)
+
+
+@app.post("/api/auth/bootstrap", response_model=TokenResponse)
+def auth_bootstrap(body: BootstrapRequest):
+    if not auth_enabled():
+        raise HTTPException(status_code=400, detail="認証は無効です（MM_AUTH_SECRET が未設定）")
+    if db.count_users() > 0:
+        raise HTTPException(status_code=403, detail="初期設定は既に完了しています")
+    username = (body.username or "").strip()
+    password = (body.password or "").replace("\r", "")
+    try:
+        db.bootstrap_registry_admin(username, password)
+    except ValueError as e:
+        msg = str(e)
+        code = 403 if "既に完了" in msg else 400
+        raise HTTPException(status_code=code, detail=msg) from e
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
+    row = db.get_user_by_username(username)
+    if not row:
+        raise HTTPException(status_code=500, detail="登録に失敗しました")
+    return TokenResponse(access_token=create_access_token(row["username"]))
+
+
+@app.post("/api/auth/register", response_model=TokenResponse)
+def auth_register(body: LoginRequest):
+    """1人目以降の自己登録（一般ユーザー）。ユーザー0件のときは初回セットアップを利用すること。"""
+    if not auth_enabled():
+        raise HTTPException(status_code=400, detail="認証は無効です（MM_AUTH_SECRET が未設定）")
+    if not self_register_enabled():
+        raise HTTPException(status_code=403, detail="自己登録は無効です（管理者にアカウント作成を依頼してください）")
+    if db.count_users() == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="最初の管理者は「初回セットアップ」から作成してください。",
+        )
+    username = (body.username or "").strip()
+    password = (body.password or "").replace("\r", "")
+    try:
+        db.create_registry_user(username, password, is_admin=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
+    row = db.get_user_by_username(username)
+    if not row:
+        raise HTTPException(status_code=500, detail="登録に失敗しました")
+    return TokenResponse(access_token=create_access_token(row["username"]))
+
+
+@app.get("/api/auth/me", response_model=AuthMeResponse)
+def auth_me(_auth: ApiUser):
+    if not auth_enabled():
+        return AuthMeResponse(username="", is_admin=False)
+    u = (_auth or "").strip()
+    if not u:
+        raise HTTPException(status_code=401, detail="認証が必要です")
+    return AuthMeResponse(username=u, is_admin=db.user_is_admin(u))
+
+
+@app.get("/api/admin/users", response_model=list[AdminUserRow])
+def admin_list_users(_admin: AdminUser):
+    rows = db.list_registry_users()
+    return [
+        AdminUserRow(
+            username=r["username"],
+            is_admin=bool(r["is_admin"]),
+            created_at=str(r["created_at"]) if r.get("created_at") is not None else None,
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/admin/users", response_model=AdminUserRow)
+def admin_create_user(body: AdminCreateUserRequest, _admin: AdminUser):
+    u = (body.username or "").strip()
+    pw = (body.password or "").replace("\r", "")
+    try:
+        db.create_registry_user(u, pw, is_admin=body.is_admin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
+    row = db.get_user_by_username(u)
+    if not row:
+        raise HTTPException(status_code=500, detail="作成に失敗しました")
+    return AdminUserRow(
+        username=u,
+        is_admin=db.user_is_admin(u),
+        created_at=str(row["created_at"]) if row["created_at"] is not None else None,
+    )
+
+
+@app.patch("/api/admin/users/{username}/password")
+def admin_reset_password(username: str, body: AdminPasswordResetRequest, _admin: AdminUser):
+    try:
+        ok = db.set_registry_user_password(username, (body.new_password or "").replace("\r", ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not ok:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません")
+    return {"ok": True}
+
+
+@app.patch("/api/admin/users/{username}/role")
+def admin_set_role(username: str, body: AdminRolePatch, _admin: AdminUser):
+    try:
+        db.set_registry_user_admin(username, body.is_admin)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{username}")
+def admin_delete_user(username: str, _admin: AdminUser):
+    if username.strip() == _admin.strip():
+        raise HTTPException(status_code=400, detail="自分自身は削除できません")
+    try:
+        db.delete_registry_user(username)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True}
+
+
+@app.get("/api/me/llm", response_model=MeLLMResponse)
+def me_llm_get(_auth: ApiUser):
+    if not auth_enabled():
+        return MeLLMResponse(openai_configured=False, openai_model="gpt-4o-mini")
+    if not (_auth or "").strip():
+        raise HTTPException(status_code=401, detail="認証が必要です")
+    key, model = db.get_user_openai_settings(_auth)
+    return MeLLMResponse(openai_configured=bool(key), openai_model=model)
+
+
+@app.patch("/api/me/llm")
+def me_llm_patch(body: MeLLMPatch, _auth: ApiUser):
+    if not auth_enabled():
+        raise HTTPException(status_code=400, detail="認証が無効なためサーバに保存できません")
+    if not (_auth or "").strip():
+        raise HTTPException(status_code=401, detail="認証が必要です")
+    api_key_arg = None
+    if "openai_api_key" in body.model_fields_set:
+        api_key_arg = (body.openai_api_key or "").strip()
+    model_arg = None
+    if "openai_model" in body.model_fields_set:
+        model_arg = (body.openai_model or "").strip() or "gpt-4o-mini"
+    if api_key_arg is None and model_arg is None:
+        return {"ok": True}
+    db.update_user_openai(_auth, api_key=api_key_arg, model=model_arg)
+    return {"ok": True}
+
+
 @app.get("/api/presets")
-def get_presets():
+def get_presets(_auth: ApiUser):
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "presets_builtin.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -80,6 +297,7 @@ def get_presets():
 
 @app.post("/api/tasks")
 async def create_task(
+    _auth: ApiUser,
     metadata: str = Form(...),
     file: UploadFile = File(...),
     prompt_extract: Optional[UploadFile] = File(None),
@@ -92,8 +310,23 @@ async def create_task(
 
     if meta.notification_type == "webhook" and not (meta.email or "").strip():
         raise HTTPException(status_code=400, detail="Webhook 通知のときはメールアドレスが必須です")
-    if meta.llm_provider == "openai" and not (meta.openai_api_key or "").strip():
-        raise HTTPException(status_code=400, detail="OpenAI を選んだときは API キーが必須です")
+
+    owner = (_auth or "").strip()
+    if meta.llm_provider == "openai":
+        if auth_enabled() and owner:
+            okey, omodel = db.get_user_openai_settings(_auth)
+            if not okey:
+                raise HTTPException(
+                    status_code=400,
+                    detail="OpenAI を使うには、先に「OpenAI 設定」で API キーを保存してください。",
+                )
+            openai_key = okey
+            openai_model = omodel
+        else:
+            if not (meta.openai_api_key or "").strip():
+                raise HTTPException(status_code=400, detail="OpenAI を選んだときは API キーが必須です")
+            openai_key = meta.openai_api_key
+            openai_model = meta.openai_model
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="ファイル名がありません")
@@ -113,6 +346,7 @@ async def create_task(
         task_id,
         meta.email or "",
         safe_name,
+        owner=owner,
         topic=meta.topic.strip(),
         tags=meta.tags.strip(),
         category=meta.category,
@@ -121,12 +355,20 @@ async def create_task(
         context_json=ctx_json,
     )
 
-    llm_config = {
-        "provider": "openai" if meta.llm_provider == "openai" else "ollama",
-        "api_key": meta.openai_api_key,
-        "ollama_model": meta.ollama_model,
-        "openai_model": meta.openai_model,
-    }
+    if meta.llm_provider == "openai":
+        llm_config = {
+            "provider": "openai",
+            "api_key": openai_key,
+            "ollama_model": meta.ollama_model,
+            "openai_model": openai_model,
+        }
+    else:
+        llm_config = {
+            "provider": "ollama",
+            "api_key": None,
+            "ollama_model": meta.ollama_model,
+            "openai_model": meta.openai_model,
+        }
 
     pe_bytes = await prompt_extract.read() if prompt_extract and prompt_extract.filename else None
     pm_bytes = await prompt_merge.read() if prompt_merge and prompt_merge.filename else None
@@ -144,6 +386,7 @@ async def create_task(
             meta.webhook_url,
             llm_config,
             prompt_paths,
+            owner,
         ],
     )
 
@@ -152,12 +395,14 @@ async def create_task(
 
 @app.get("/api/records")
 def list_records(
+    _auth: ApiUser,
     days: int = 7,
     search: str = "",
     category: str = "",
     status_filter: str = "",
 ):
     rows = db.get_recent_records(
+        _auth or "",
         days=days,
         search=search,
         category=category,
@@ -167,22 +412,22 @@ def list_records(
 
 
 @app.get("/api/queue")
-def queue_records():
-    rows = db.get_active_queue_records()
+def queue_records(_auth: ApiUser):
+    rows = db.get_active_queue_records(_auth or "")
     return [_row_to_dict(r) for r in rows]
 
 
 @app.get("/api/records/{task_id}")
-def get_record(task_id: str):
-    row = db.get_record(task_id)
+def get_record(task_id: str, _auth: ApiUser):
+    row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     return _row_to_dict(row)
 
 
 @app.get("/api/records/{task_id}/export/minutes")
-def export_minutes(task_id: str):
-    row = db.get_record(task_id)
+def export_minutes(task_id: str, _auth: ApiUser):
+    row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     summary = row["summary"]
@@ -199,8 +444,8 @@ def export_minutes(task_id: str):
 
 
 @app.get("/api/records/{task_id}/export/transcript")
-def export_transcript(task_id: str):
-    row = db.get_record(task_id)
+def export_transcript(task_id: str, _auth: ApiUser):
+    row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     text = row["transcript"] or ""
@@ -215,9 +460,9 @@ def export_transcript(task_id: str):
 
 
 @app.patch("/api/records/{task_id}/summary")
-def patch_summary(task_id: str, body: SummaryPatch):
-    row = db.get_record(task_id)
+def patch_summary(task_id: str, body: SummaryPatch, _auth: ApiUser):
+    row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")
-    db.update_record(task_id, summary=body.summary)
+    db.update_record(task_id, _auth or "", summary=body.summary)
     return {"ok": True}

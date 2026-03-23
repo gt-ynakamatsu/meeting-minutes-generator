@@ -1,0 +1,2 @@
+# Bash は CRLF だと Linux で壊れることがあるため LF 推奨
+scripts/*.sh text eol=lf

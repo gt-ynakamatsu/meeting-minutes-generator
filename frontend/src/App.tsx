@@ -1,20 +1,149 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
+  adminCreateUser,
+  adminDeleteUser,
+  adminListUsers,
+  adminResetPassword,
+  adminSetRole,
+  bootstrapRequest,
   createTask,
-  exportMinutesUrl,
-  exportTranscriptUrl,
+  downloadExportMinutes,
+  downloadExportTranscript,
+  getAuthMe,
+  getAuthStatus,
   getPresets,
+  getMeLlm,
   getQueue,
   getRecord,
+  getStoredToken,
   getVersion,
   listRecords,
+  loginRequest,
+  registerRequest,
+  patchMeLlm,
   patchSummary,
+  setStoredToken,
+  type AdminUserRow,
+  type AuthMe,
+  type AuthStatus,
   type RecordRow,
   type TaskSubmitMetadata,
 } from "./api";
 
 const LS_PENDING = "mm_pending_tasks";
+
+function UserCircleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <path
+        d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function SettingsDrawer({
+  open,
+  onClose,
+  title = "設定",
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return (
+    <div className="settings-drawer-root" role="dialog" aria-modal="true" aria-labelledby="settings-drawer-title">
+      <button type="button" className="settings-drawer-backdrop" aria-label="閉じる" onClick={onClose} />
+      <div className="settings-drawer-panel">
+        <div className="settings-drawer-head">
+          <h2 id="settings-drawer-title">{title}</h2>
+          <button type="button" className="settings-drawer-close" onClick={onClose} aria-label="閉じる">
+            ×
+          </button>
+        </div>
+        <div className="settings-drawer-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function AccountMenuDropdown({
+  items,
+}: {
+  items: { key: string; label: string; onClick: () => void; danger?: boolean }[];
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [menuOpen]);
+
+  return (
+    <div className="account-menu" ref={rootRef}>
+      <button
+        type="button"
+        className="account-icon-btn"
+        aria-label="アカウントメニュー"
+        aria-expanded={menuOpen}
+        aria-haspopup="true"
+        onClick={() => setMenuOpen((v) => !v)}
+      >
+        <UserCircleIcon />
+      </button>
+      {menuOpen ? (
+        <div className="account-menu-dropdown" role="menu">
+          {items.map((it) => (
+            <button
+              key={it.key}
+              type="button"
+              role="menuitem"
+              className={`account-menu-item${it.danger ? " account-menu-item--danger" : ""}`}
+              onClick={() => {
+                it.onClick();
+                setMenuOpen(false);
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function exportBasename(row: RecordRow): string {
+  const f = row.filename || "file";
+  const base = f.replace(/^.*[/\\]/, "") || "file";
+  return base.length > 180 ? base.slice(0, 180) : base;
+}
 
 function loadPending(): string[] {
   try {
@@ -156,9 +285,15 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
               <MinutesBody text={summary} />
               {summary.trim() && summary !== "None" ? (
                 <p style={{ marginTop: "0.65rem" }}>
-                  <a href={exportMinutesUrl(row.id)} download>
+                  <button
+                    type="button"
+                    className="btn-link"
+                    onClick={() =>
+                      void downloadExportMinutes(row.id, `minutes_${exportBasename(row)}.md`).catch((e) => alert(String(e)))
+                    }
+                  >
                     議事録をダウンロード（.md）
-                  </a>
+                  </button>
                 </p>
               ) : null}
             </>
@@ -194,9 +329,15 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
             <div>
               <textarea readOnly rows={12} value={row.transcript || ""} style={{ width: "100%" }} />
               <p style={{ marginTop: "0.5rem" }}>
-                <a href={exportTranscriptUrl(row.id)} download>
+                <button
+                  type="button"
+                  className="btn-link"
+                  onClick={() =>
+                    void downloadExportTranscript(row.id, `${exportBasename(row)}.txt`).catch((e) => alert(String(e)))
+                  }
+                >
                   テキストをダウンロード
-                </a>
+                </button>
               </p>
             </div>
           ) : null}
@@ -223,7 +364,475 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
   );
 }
 
+function BootstrapPanel({ onDone }: { onDone: () => void }) {
+  const [u, setU] = useState("");
+  const [p, setP] = useState("");
+  const [p2, setP2] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  return (
+    <div className="auth-shell">
+      <header className="auth-top-bar">
+        <span className="auth-top-bar-brand">AI 議事録</span>
+        <AccountMenuDropdown
+          items={[
+            { key: "settings", label: "説明・設定", onClick: () => setSettingsOpen(true) },
+            {
+              key: "form",
+              label: "セットアップフォームへ",
+              onClick: () => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+            },
+          ]}
+        />
+      </header>
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        <p className="muted" style={{ marginTop: 0 }}>
+          初回セットアップでは、下のフォームから最初の管理者アカウントを登録してください。登録後は通常どおりログインして利用できます。
+        </p>
+      </SettingsDrawer>
+      <main className="main auth-form" style={{ maxWidth: 480, margin: "2rem auto" }}>
+        <h1>初回セットアップ</h1>
+        <p className="muted">
+          最初の管理者アカウントを作成してください。この操作はユーザーが 0 人のときだけ可能です。パスワードは 8 文字以上です。
+        </p>
+        <form
+          ref={formRef}
+          id="bootstrap-account-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void (async () => {
+              setErr(null);
+              if (p !== p2) {
+                setErr("パスワードが一致しません");
+                return;
+              }
+              setBusy(true);
+              try {
+                const { access_token } = await bootstrapRequest(u.trim(), p);
+                setStoredToken(access_token);
+                onDone();
+              } catch (ex) {
+                setErr(String(ex));
+              } finally {
+                setBusy(false);
+              }
+            })();
+          }}
+        >
+          <label>ユーザー名</label>
+          <input value={u} onChange={(e) => setU(e.target.value)} autoComplete="username" />
+          <label>パスワード（8 文字以上）</label>
+          <input type="password" value={p} onChange={(e) => setP(e.target.value)} autoComplete="new-password" />
+          <label>パスワード（確認）</label>
+          <input type="password" value={p2} onChange={(e) => setP2(e.target.value)} autoComplete="new-password" />
+          {err ? <p className="error-box">{err}</p> : null}
+          <button className="btn-primary" type="submit" disabled={busy || !u.trim() || p.length < 8}>
+            登録してログイン
+          </button>
+        </form>
+        <p className="muted" style={{ marginTop: "1.25rem", fontSize: "0.85rem" }}>
+          代わりに環境変数 <code>MM_BOOTSTRAP_ADMIN_USER</code> / <code>MM_BOOTSTRAP_ADMIN_PASSWORD</code> で初期ユーザーを作ることもできます。
+        </p>
+      </main>
+    </div>
+  );
+}
+
+function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
+  const [rows, setRows] = useState<AdminUserRow[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [nu, setNu] = useState("");
+  const [np, setNp] = useState("");
+  const [na, setNa] = useState(false);
+  const [editingPw, setEditingPw] = useState<string | null>(null);
+  const [pwNew, setPwNew] = useState("");
+
+  const load = useCallback(() => {
+    setErr(null);
+    adminListUsers()
+      .then(setRows)
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <>
+      <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
+        ユーザーの登録・削除、パスワード再設定、管理者権限の付与・解除ができます。最後の管理者は削除・権限解除できません。
+      </p>
+      {msg ? <p className="muted">{msg}</p> : null}
+      {err ? <p className="error-box">{err}</p> : null}
+
+      <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                <th style={{ textAlign: "left", padding: "0.5rem 0" }}>ユーザー</th>
+                <th style={{ textAlign: "left", padding: "0.5rem" }}>管理者権限</th>
+                <th style={{ textAlign: "right", padding: "0.5rem 0" }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.username} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                  <td style={{ padding: "0.5rem 0" }}>
+                    <code>{r.username}</code>
+                    {r.username === selfUsername ? <span className="muted"> （あなた）</span> : null}
+                  </td>
+                  <td style={{ padding: "0.5rem" }}>{r.is_admin ? "はい" : "—"}</td>
+                  <td style={{ padding: "0.5rem 0", textAlign: "right", whiteSpace: "nowrap" }}>
+                    {editingPw === r.username ? (
+                      <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center", justifyContent: "flex-end" }}>
+                        <input
+                          type="password"
+                          placeholder="新パスワード"
+                          value={pwNew}
+                          onChange={(e) => setPwNew(e.target.value)}
+                          style={{ maxWidth: 140 }}
+                        />
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => {
+                            void (async () => {
+                              setErr(null);
+                              setMsg(null);
+                              try {
+                                await adminResetPassword(r.username, pwNew);
+                                setEditingPw(null);
+                                setPwNew("");
+                                setMsg("パスワードを更新しました。");
+                                load();
+                              } catch (e) {
+                                setErr(String(e));
+                              }
+                            })();
+                          }}
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => {
+                            setEditingPw(null);
+                            setPwNew("");
+                          }}
+                        >
+                          取消
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        <button type="button" className="btn-link" onClick={() => { setEditingPw(r.username); setPwNew(""); }}>
+                          パスワード
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-link"
+                          onClick={() => {
+                            void (async () => {
+                              setErr(null);
+                              setMsg(null);
+                              try {
+                                await adminSetRole(r.username, !r.is_admin);
+                                setMsg("管理者権限を更新しました。");
+                                load();
+                              } catch (e) {
+                                setErr(String(e));
+                              }
+                            })();
+                          }}
+                        >
+                          {r.is_admin ? "管理者権限を解除" : "管理者権限を付与"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-link"
+                          style={{ color: "var(--danger, #b00)" }}
+                          disabled={r.username === selfUsername}
+                          onClick={() => {
+                            if (!window.confirm(`ユーザー「${r.username}」を削除しますか？`)) return;
+                            void (async () => {
+                              setErr(null);
+                              setMsg(null);
+                              try {
+                                await adminDeleteUser(r.username);
+                                setMsg("ユーザーを削除しました。");
+                                load();
+                              } catch (e) {
+                                setErr(String(e));
+                              }
+                            })();
+                          }}
+                        >
+                          削除
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+      <h3 style={{ marginTop: "1.5rem" }}>ユーザーを追加</h3>
+      <div className="auth-form" style={{ maxWidth: "100%" }}>
+        <label>ユーザー名</label>
+        <input value={nu} onChange={(e) => setNu(e.target.value)} autoComplete="off" />
+        <label>初期パスワード（8 文字以上）</label>
+        <input type="password" value={np} onChange={(e) => setNp(e.target.value)} autoComplete="new-password" />
+        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+          <input type="checkbox" checked={na} onChange={(e) => setNa(e.target.checked)} />
+          管理者権限を付与する
+        </label>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={!nu.trim() || np.length < 8}
+          onClick={() => {
+            void (async () => {
+              setErr(null);
+              setMsg(null);
+              try {
+                await adminCreateUser({ username: nu.trim(), password: np, is_admin: na });
+                setNu("");
+                setNp("");
+                setNa(false);
+                setMsg("ユーザーを追加しました。");
+                load();
+              } catch (e) {
+                setErr(String(e));
+              }
+            })();
+          }}
+        >
+          追加
+        </button>
+      </div>
+    </>
+  );
+}
+
+function LoginPanel({
+  onSuccess,
+  selfRegisterAllowed,
+}: {
+  onSuccess: () => void;
+  selfRegisterAllowed: boolean;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [u, setU] = useState("");
+  const [p, setP] = useState("");
+  const [p2, setP2] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const userRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="auth-shell">
+      <header className="auth-top-bar">
+        <span className="auth-top-bar-brand">AI 議事録</span>
+        <AccountMenuDropdown
+          items={[
+            { key: "settings", label: "説明・設定", onClick: () => setSettingsOpen(true) },
+            { key: "form", label: "ログインフォームへ", onClick: () => userRef.current?.focus() },
+          ]}
+        />
+      </header>
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        <p className="muted" style={{ marginTop: 0 }}>
+          {selfRegisterAllowed
+            ? "ログインまたは新規登録で入れます。右上のアイコンからメニューを開き、「ログインフォームへ」でユーザー名欄にフォーカスできます。"
+            : "ユーザー名とパスワードを入力してログインしてください。アカウントは管理者が発行します。右上のアイコンからメニューを開き、「ログインフォームへ」でフォームにフォーカスできます。"}
+        </p>
+      </SettingsDrawer>
+      <main className="main auth-form" style={{ maxWidth: 420, margin: "2rem auto" }}>
+        <h1>{mode === "login" ? "ログイン" : "新規登録"}</h1>
+        <p className="muted">
+          {mode === "login"
+            ? "アカウントをお持ちの方はログインしてください。"
+            : "ユーザー名とパスワードを決めて登録します（一般ユーザー）。パスワードは 8 文字以上です。"}
+        </p>
+        {selfRegisterAllowed ? (
+          <div className="auth-mode-tabs" role="tablist" aria-label="ログインまたは登録">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "login"}
+              className={mode === "login" ? "auth-mode-tab active" : "auth-mode-tab"}
+              onClick={() => {
+                setMode("login");
+                setErr(null);
+                setP2("");
+              }}
+            >
+              ログイン
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "register"}
+              className={mode === "register" ? "auth-mode-tab active" : "auth-mode-tab"}
+              onClick={() => {
+                setMode("register");
+                setErr(null);
+                setP2("");
+              }}
+            >
+              新規登録
+            </button>
+          </div>
+        ) : null}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void (async () => {
+              setErr(null);
+              if (mode === "register") {
+                if (p !== p2) {
+                  setErr("パスワードが一致しません");
+                  return;
+                }
+              }
+              setBusy(true);
+              try {
+                const { access_token } =
+                  mode === "login"
+                    ? await loginRequest(u.trim(), p)
+                    : await registerRequest(u.trim(), p);
+                setStoredToken(access_token);
+                onSuccess();
+              } catch (ex) {
+                setErr(String(ex));
+              } finally {
+                setBusy(false);
+              }
+            })();
+          }}
+        >
+          <label>ユーザー名</label>
+          <input
+            ref={userRef}
+            value={u}
+            onChange={(e) => setU(e.target.value)}
+            autoComplete={mode === "login" ? "username" : "username"}
+          />
+          <label>パスワード{mode === "register" ? "（8 文字以上）" : ""}</label>
+          <input
+            type="password"
+            value={p}
+            onChange={(e) => setP(e.target.value)}
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+          />
+          {mode === "register" ? (
+            <>
+              <label>パスワード（確認）</label>
+              <input
+                type="password"
+                value={p2}
+                onChange={(e) => setP2(e.target.value)}
+                autoComplete="new-password"
+              />
+            </>
+          ) : null}
+          {err ? <p className="error-box">{err}</p> : null}
+          <button
+            className="btn-primary"
+            type="submit"
+            disabled={busy || !u.trim() || (mode === "register" ? p.length < 8 : !p)}
+          >
+            {mode === "login" ? "ログイン" : "登録してログイン"}
+          </button>
+        </form>
+      </main>
+    </div>
+  );
+}
+
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authNonce, setAuthNonce] = useState(0);
+
+  useEffect(() => {
+    getAuthStatus()
+      .then(setAuthStatus)
+      .catch(() => setAuthStatus({ auth_required: false, bootstrap_needed: false, self_register_allowed: false }));
+  }, []);
+
+  useEffect(() => {
+    const h = () => setAuthNonce((n) => n + 1);
+    window.addEventListener("mm-auth-lost", h);
+    return () => window.removeEventListener("mm-auth-lost", h);
+  }, []);
+
+  if (authStatus === null) {
+    return (
+      <div className="layout">
+        <p className="muted" style={{ padding: "2rem" }}>
+          読み込み中…
+        </p>
+      </div>
+    );
+  }
+
+  if (authStatus.auth_required && authStatus.bootstrap_needed) {
+    return (
+      <BootstrapPanel
+        onDone={async () => {
+          const st = await getAuthStatus();
+          setAuthStatus(st);
+        }}
+      />
+    );
+  }
+
+  const hasToken = !!getStoredToken();
+  if (authStatus.auth_required && !hasToken) {
+    return (
+      <LoginPanel
+        onSuccess={() => setAuthNonce((n) => n + 1)}
+        selfRegisterAllowed={authStatus.self_register_allowed !== false}
+      />
+    );
+  }
+
+  const showLogout = authStatus.auth_required;
+
+  return (
+    <AppMain
+      showLogout={showLogout}
+      serverOpenaiMode={authStatus.auth_required}
+      authNonce={authNonce}
+      onLogout={() => {
+        setStoredToken(null);
+        setAuthNonce((n) => n + 1);
+      }}
+    />
+  );
+}
+
+function AppMain({
+  showLogout,
+  serverOpenaiMode,
+  authNonce,
+  onLogout,
+}: {
+  showLogout: boolean;
+  serverOpenaiMode: boolean;
+  authNonce: number;
+  onLogout: () => void;
+}) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"general" | "admin">("general");
+  const [authMe, setAuthMe] = useState<AuthMe | null>(null);
   const [version, setVersion] = useState("");
   const [presets, setPresets] = useState<Record<string, { label: string }>>({});
   const [presetId, setPresetId] = useState("standard");
@@ -247,6 +856,11 @@ export default function App() {
   const [ollamaModel, setOllamaModel] = useState("qwen2.5:7b");
   const [openaiKey, setOpenaiKey] = useState("");
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
+  const [openaiConfigured, setOpenaiConfigured] = useState(false);
+  const [profileOpenaiModel, setProfileOpenaiModel] = useState("gpt-4o-mini");
+  const [openaiKeyDraft, setOpenaiKeyDraft] = useState("");
+  const [llmProfileMsg, setLlmProfileMsg] = useState<string | null>(null);
+  const [llmProfileErr, setLlmProfileErr] = useState<string | null>(null);
 
   const [notification, setNotification] = useState<"browser" | "webhook" | "none">("browser");
   const [email, setEmail] = useState("");
@@ -271,6 +885,26 @@ export default function App() {
   const refreshQueue = useCallback(async () => {
     setQueue(await getQueue());
   }, []);
+
+  useEffect(() => {
+    if (!serverOpenaiMode) {
+      setAuthMe(null);
+      return;
+    }
+    getAuthMe()
+      .then(setAuthMe)
+      .catch(() => setAuthMe(null));
+  }, [serverOpenaiMode, authNonce]);
+
+  useEffect(() => {
+    if (!serverOpenaiMode) return;
+    getMeLlm()
+      .then((m) => {
+        setOpenaiConfigured(m.openai_configured);
+        setProfileOpenaiModel(m.openai_model || "gpt-4o-mini");
+      })
+      .catch(() => {});
+  }, [serverOpenaiMode, authNonce]);
 
   useEffect(() => {
     getVersion().then((v) => setVersion(v.version)).catch(() => setVersion("?"));
@@ -332,7 +966,13 @@ export default function App() {
   const canSubmit =
     !!file &&
     (notification !== "webhook" || email.trim().length > 0) &&
-    (llmProvider !== "openai" || openaiKey.trim().length > 0);
+    (llmProvider !== "openai" ||
+      (serverOpenaiMode ? openaiConfigured : openaiKey.trim().length > 0));
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    setSettingsTab("general");
+  }, []);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -346,8 +986,8 @@ export default function App() {
       notification_type: notification,
       llm_provider: llmProvider,
       ollama_model: ollamaModel.trim(),
-      openai_api_key: openaiKey.trim() || null,
-      openai_model: openaiModel,
+      openai_api_key: serverOpenaiMode ? null : openaiKey.trim() || null,
+      openai_model: serverOpenaiMode ? profileOpenaiModel : openaiModel,
       topic: topic.trim(),
       meeting_date: meetingDate.trim(),
       category,
@@ -381,16 +1021,60 @@ export default function App() {
   return (
     <div className="layout">
       <header className="hero">
-        <span className="pill">社内利用</span>
-        <span className="pill">フロント / API 分離</span>
+        <div className="hero-top">
+          <div className="hero-top-actions">
+            <AccountMenuDropdown
+              items={[
+                {
+                  key: "settings",
+                  label: "設定",
+                  onClick: () => {
+                    setSettingsTab("general");
+                    setSettingsOpen(true);
+                  },
+                },
+                ...(authMe?.is_admin && serverOpenaiMode
+                  ? [
+                      {
+                        key: "admin",
+                        label: "ユーザー・権限管理",
+                        onClick: () => {
+                          setSettingsTab("admin");
+                          setSettingsOpen(true);
+                        },
+                      },
+                    ]
+                  : []),
+                showLogout
+                  ? {
+                      key: "signout",
+                      label: "サインアウト",
+                      danger: true,
+                      onClick: () => {
+                        closeSettings();
+                        onLogout();
+                      },
+                    }
+                  : {
+                      key: "signin",
+                      label: "サインイン",
+                      onClick: () => {
+                        setSettingsTab("general");
+                        setSettingsOpen(true);
+                      },
+                    },
+              ]}
+            />
+          </div>
+        </div>
         <h1>AI 議事録アーカイブ</h1>
         <p className="muted">
-          動画・音声、または文字起こし済みテキスト・SRT から議事録を作成します。左のフォームからキューに投入し、下のアーカイブで結果を確認できます。
+          動画・音声、または文字起こし済みテキスト・SRT から議事録を作成します。ファイルを選んで左のフォームを埋め、キューに投入してください。下のアーカイブで結果を確認できます。
         </p>
       </header>
 
       <aside className="sidebar">
-        <form onSubmit={onSubmit}>
+        <form id="mm-task-form" onSubmit={onSubmit}>
           <h3>会議情報</h3>
           <label>議題（任意）</label>
           <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="例: 四半期レビュー" />
@@ -436,6 +1120,13 @@ export default function App() {
           </details>
 
           <h3>解析設定</h3>
+          {serverOpenaiMode ? (
+            <p className="muted" style={{ fontSize: "0.85rem", lineHeight: 1.55 }}>
+              OpenAI を使う場合は右上の<strong>アカウントアイコン</strong>からメニューを開き、<strong>設定</strong>から
+              API キーを登録してください。モデル: <code>{profileOpenaiModel}</code>
+              {!openaiConfigured ? "（未登録のため OpenAI での投入はできません）" : null}
+            </p>
+          ) : null}
           <label>AI の接続先</label>
           <select
             value={llmProvider}
@@ -445,18 +1136,25 @@ export default function App() {
             <option value="openai">OpenAI API</option>
           </select>
           {llmProvider === "openai" ? (
-            <>
-              <label>OpenAI API キー</label>
-              <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
-              <label>OpenAI モデル</label>
-              <select value={openaiModel} onChange={(e) => setOpenaiModel(e.target.value)}>
-                {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </>
+            serverOpenaiMode ? (
+              <p className="muted" style={{ fontSize: "0.88rem" }}>
+                上の「OpenAI アカウント」でキーを登録してください。使用モデル: <code>{profileOpenaiModel}</code>
+                {!openaiConfigured ? "（未登録のため投入できません）" : null}
+              </p>
+            ) : (
+              <>
+                <label>OpenAI API キー</label>
+                <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
+                <label>OpenAI モデル</label>
+                <select value={openaiModel} onChange={(e) => setOpenaiModel(e.target.value)}>
+                  {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )
           ) : (
             <>
               <label>Ollama モデル名</label>
@@ -482,12 +1180,6 @@ export default function App() {
             </>
           ) : null}
 
-          <h3>ファイル</h3>
-          <input
-            type="file"
-            accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
           <details>
             <summary>カスタムプロンプト（任意）</summary>
             <label>抽出 .txt</label>
@@ -506,6 +1198,26 @@ export default function App() {
       </aside>
 
       <main className="main">
+        <div className="main-file-picker">
+          <label htmlFor="mm-main-file">解析するファイル</label>
+          <input
+            id="mm-main-file"
+            form="mm-task-form"
+            type="file"
+            accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+          {file ? (
+            <p className="muted" style={{ fontSize: "0.85rem", margin: "0.35rem 0 0" }}>
+              選択中: <strong>{file.name}</strong>
+            </p>
+          ) : (
+            <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0" }}>
+              .mp4 / .mp3 / .m4a / .wav / .txt / .srt
+            </p>
+          )}
+        </div>
+
         <h2>処理キュー</h2>
         <div className="queue">
           {queue.length === 0 ? (
@@ -546,6 +1258,157 @@ export default function App() {
           records.map((r) => <RecordCard key={r.id} row={r} onSaved={refreshRecords} />)
         )}
       </main>
+
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={closeSettings}
+        title={
+          serverOpenaiMode && authMe?.is_admin && settingsTab === "admin" ? "ユーザー・権限管理" : "設定"
+        }
+      >
+        {serverOpenaiMode && authMe?.is_admin ? (
+          <div className="settings-drawer-tabs" role="tablist" aria-label="設定の種別">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "general"}
+              className={`settings-drawer-tab${settingsTab === "general" ? " settings-drawer-tab--active" : ""}`}
+              onClick={() => setSettingsTab("general")}
+            >
+              一般
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "admin"}
+              className={`settings-drawer-tab${settingsTab === "admin" ? " settings-drawer-tab--active" : ""}`}
+              onClick={() => setSettingsTab("admin")}
+            >
+              ユーザー・権限
+            </button>
+          </div>
+        ) : null}
+
+        {settingsTab === "general" || !serverOpenaiMode || !authMe?.is_admin ? (
+          <>
+            {serverOpenaiMode ? (
+              <section className="settings-section">
+                <h3>アカウント</h3>
+                {authMe ? (
+                  <p style={{ margin: 0, fontSize: "0.92rem" }}>
+                    <code>{authMe.username}</code>
+                    {authMe.is_admin ? <span className="muted"> · 管理者</span> : null}
+                  </p>
+                ) : (
+                  <p className="muted">アカウント情報を読み込み中です…</p>
+                )}
+                {showLogout ? (
+                  <p className="muted" style={{ fontSize: "0.82rem", margin: "0.65rem 0 0" }}>
+                    ログアウトは右上メニューの「サインアウト」から行えます。
+                  </p>
+                ) : null}
+              </section>
+            ) : (
+              <section className="settings-section">
+                <h3>アカウント</h3>
+                <p className="muted" style={{ margin: 0 }}>
+                  認証は無効です。OpenAI を使う場合は左のフォームから API キーを入力してください。
+                </p>
+              </section>
+            )}
+
+            {serverOpenaiMode ? (
+              <section className="settings-section">
+                <h3>OpenAI</h3>
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+              API キーはサーバ（registry DB）に保存され、あなたの議事録ジョブでのみ使われます。
+            </p>
+            <label>API キー（新規または入れ替え）</label>
+            <input
+              type="password"
+              value={openaiKeyDraft}
+              onChange={(e) => setOpenaiKeyDraft(e.target.value)}
+              placeholder={openaiConfigured ? "登録済み（変更するときだけ入力）" : "sk-..."}
+              autoComplete="off"
+            />
+            <label>モデル</label>
+            <select value={profileOpenaiModel} onChange={(e) => setProfileOpenaiModel(e.target.value)}>
+              {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                void (async () => {
+                  setLlmProfileErr(null);
+                  setLlmProfileMsg(null);
+                  try {
+                    const hadKeyInput = openaiKeyDraft.trim().length > 0;
+                    const patch: { openai_api_key?: string; openai_model: string } = {
+                      openai_model: profileOpenaiModel,
+                    };
+                    if (hadKeyInput) patch.openai_api_key = openaiKeyDraft.trim();
+                    await patchMeLlm(patch);
+                    setOpenaiKeyDraft("");
+                    const m = await getMeLlm();
+                    setOpenaiConfigured(m.openai_configured);
+                    setProfileOpenaiModel(m.openai_model);
+                    setLlmProfileMsg(
+                      hadKeyInput
+                        ? "API キーを保存しました。"
+                        : m.openai_configured
+                          ? "モデル設定を更新しました。"
+                          : "モデルを保存しました（API キーは未登録のままです）。",
+                    );
+                  } catch (ex) {
+                    setLlmProfileErr(String(ex));
+                  }
+                })();
+              }}
+            >
+              OpenAI 設定を保存
+            </button>
+            {openaiConfigured ? (
+              <p style={{ marginTop: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn-link"
+                  onClick={() => {
+                    void (async () => {
+                      setLlmProfileErr(null);
+                      setLlmProfileMsg(null);
+                      try {
+                        await patchMeLlm({ openai_api_key: "" });
+                        const m = await getMeLlm();
+                        setOpenaiConfigured(m.openai_configured);
+                        setLlmProfileMsg("API キーを削除しました。");
+                      } catch (ex) {
+                        setLlmProfileErr(String(ex));
+                      }
+                    })();
+                  }}
+                >
+                  保存済み API キーを削除
+                </button>
+              </p>
+            ) : null}
+            {llmProfileMsg ? <p className="muted" style={{ fontSize: "0.85rem" }}>{llmProfileMsg}</p> : null}
+            {llmProfileErr ? <p className="error-box">{llmProfileErr}</p> : null}
+              </section>
+            ) : null}
+          </>
+        ) : null}
+
+        {settingsTab === "admin" && serverOpenaiMode && authMe?.is_admin ? (
+          <section className="settings-section">
+            <AdminUserPanel selfUsername={authMe.username} />
+          </section>
+        ) : null}
+      </SettingsDrawer>
 
       <footer className="footer">Meeting Minutes Generator · v{version || "…"}</footer>
     </div>

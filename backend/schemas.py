@@ -17,6 +17,7 @@ class TaskSubmitMetadata(BaseModel):
     notification_type: Literal["browser", "webhook", "none"] = "browser"
     llm_provider: Literal["ollama", "openai"] = "ollama"
     ollama_model: str = "qwen2.5:7b"
+    # 認証オフ時のみ使用。ログイン時はサーバに保存したキーを使います。
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4o-mini"
     topic: str = ""
@@ -29,6 +30,62 @@ class TaskSubmitMetadata(BaseModel):
 
 class SummaryPatch(BaseModel):
     summary: str
+
+
+class LoginRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class AuthStatusResponse(BaseModel):
+    auth_required: bool
+    bootstrap_needed: bool
+    self_register_allowed: bool = True
+
+
+class BootstrapRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+class AuthMeResponse(BaseModel):
+    username: str
+    is_admin: bool
+
+
+class AdminUserRow(BaseModel):
+    username: str
+    is_admin: bool
+    created_at: Optional[str] = None
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+    is_admin: bool = False
+
+
+class AdminPasswordResetRequest(BaseModel):
+    new_password: str = ""
+
+
+class AdminRolePatch(BaseModel):
+    is_admin: bool
+
+
+class MeLLMResponse(BaseModel):
+    openai_configured: bool
+    openai_model: str
+
+
+class MeLLMPatch(BaseModel):
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
 
 
 class RecordsQuery(BaseModel):

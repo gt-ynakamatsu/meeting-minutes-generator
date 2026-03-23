@@ -330,9 +330,16 @@ def _assemble_merge_prompt(base_template, record, preset_merge_hint):
 
 @app.task
 def process_video_task(
-    task_id, email, filename, file_path, webhook_url=None, llm_config=None, prompt_paths=None
+    task_id,
+    email,
+    filename,
+    file_path,
+    webhook_url=None,
+    llm_config=None,
+    prompt_paths=None,
+    owner_username="",
 ):
-    record = db.get_record(task_id)
+    record = db.get_record(task_id, owner_username or "")
     if not record:
         return
 
@@ -352,7 +359,7 @@ def process_video_task(
     is_transcript = ext in (".txt", ".srt")
 
     def fail(msg, exc_info=False):
-        db.update_record(task_id, status=f"Error: {msg}")
+        db.update_record(task_id, owner_username or "", status=f"Error: {msg}")
         _cleanup_user_prompts(task_id)
         try:
             if os.path.exists(audio_path):
@@ -364,7 +371,7 @@ def process_video_task(
 
     try:
         if is_transcript:
-            db.update_record(task_id, status="processing:reading_transcript")
+            db.update_record(task_id, owner_username or "", status="processing:reading_transcript")
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             segments = normalize_to_segments(content)
@@ -375,9 +382,9 @@ def process_video_task(
             if not chunks_for_ai:
                 fail("チャンクを生成できませんでした")
                 return
-            db.update_record(task_id, transcript=raw_transcript)
+            db.update_record(task_id, owner_username or "", transcript=raw_transcript)
         else:
-            db.update_record(task_id, status="processing:extracting_audio")
+            db.update_record(task_id, owner_username or "", status="processing:extracting_audio")
             video = None
             try:
                 video = VideoFileClip(file_path)
@@ -386,7 +393,7 @@ def process_video_task(
                 if video:
                     video.close()
 
-            db.update_record(task_id, status="processing:transcribing")
+            db.update_record(task_id, owner_username or "", status="processing:transcribing")
             model = WhisperModel("medium", device="cuda", compute_type="float16")
             raw_segments, _ = model.transcribe(audio_path)
             segments = normalize_to_segments(list(raw_segments))
@@ -394,7 +401,7 @@ def process_video_task(
             torch.cuda.empty_cache()
 
             chunks_for_ai, raw_transcript = build_chunks_from_segments(segments)
-            db.update_record(task_id, transcript=raw_transcript)
+            db.update_record(task_id, owner_username or "", transcript=raw_transcript)
             if not chunks_for_ai:
                 fail("文字起こし結果が空でした")
                 return
@@ -407,7 +414,7 @@ def process_video_task(
         total_chunks = len(chunks_for_ai)
 
         for i, chunk_text in enumerate(chunks_for_ai):
-            db.update_record(task_id, status=f"processing:extracting ({i+1}/{total_chunks})")
+            db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
             prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
             try:
                 response_text = call_llm(prompt, llm_config, temperature=0, json_mode=True)
@@ -430,7 +437,7 @@ def process_video_task(
             else:
                 error_msg += "No errors captured, but no JSON data was extracted."
 
-            db.update_record(task_id, status="completed", summary=error_msg)
+            db.update_record(task_id, owner_username or "", status="completed", summary=error_msg)
             try:
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
@@ -441,7 +448,7 @@ def process_video_task(
             _cleanup_user_prompts(task_id)
             return
 
-        db.update_record(task_id, status="processing:merging")
+        db.update_record(task_id, owner_username or "", status="processing:merging")
 
         combined_data = {"decisions": [], "issues": [], "items": [], "notes": []}
         for data in extracted_results:
@@ -470,7 +477,7 @@ def process_video_task(
         final_summary = re.sub(timestamp_pattern, "", final_summary)
         final_summary = final_summary.strip()
 
-        db.update_record(task_id, status="completed", summary=final_summary)
+        db.update_record(task_id, owner_username or "", status="completed", summary=final_summary)
 
         final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
         if email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
@@ -496,7 +503,7 @@ def process_video_task(
         import traceback
 
         traceback.print_exc()
-        db.update_record(task_id, status=f"Error: {str(e)}")
+        db.update_record(task_id, owner_username or "", status=f"Error: {str(e)}")
         _cleanup_user_prompts(task_id)
         try:
             if os.path.exists(audio_path):

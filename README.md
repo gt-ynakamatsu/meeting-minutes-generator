@@ -48,6 +48,7 @@ cd meeting-minutes-generator
 | **CORS（本番・社内 URL）** | ブラウザから **別ホスト名・HTTPS** で API にアクセスする場合は、起動**前**に **`MM_CORS_ORIGINS`**（カンマ区切り）にそのオリジンを含めてください。ローカルだけなら既定のままで可。 |
 | **Webhook（任意）** | 完了通知を使う場合は **`.env` の `WEBHOOK_URL`** に実 URL を書く（`docker-compose.yml` は `${WEBHOOK_URL}` を参照）。未使用ならプレースホルダのままで可。 |
 | **.env（任意）** | プロジェクト直下の `.env` を Compose が自動読み込み。**GT-2222 では既定として `config/gt-2222.env` をコピー**するのがおすすめ（`cp config/gt-2222.env .env`）。汎用テンプレは `.env.example`。 |
+| **ログイン認証** | **`MM_AUTH_SECRET`** があると JWT ログインが有効になり、**ユーザーごとに `data/user_data/.../minutes.db` に議事録が分離**されます。`docker compose` では未指定時も **既定のフォールバック秘密鍵で認証 ON**（本番は `openssl rand -hex 32` 等で必ず差し替え）。初回はブラウザの初回セットアップまたは `MM_BOOTSTRAP_ADMIN_*` で管理者を作成。 |
 
 **Compose が起動時に自動で行うもの（事前準備不要）**
 
@@ -103,6 +104,10 @@ docker exec ollama-server ollama pull qwen2.5:7b
 | `OLLAMA_BASE_URL` | LLM（Compose 内ワーカー既定は **`http://ollama-server:11434`**・`llm-net` 上のコンテナ名想定。CLI をホストで動かすなら `http://127.0.0.1:11434` 等） |
 | `OLLAMA_MODEL` | CLI パイプライン `02_extract` / `03_merge` のモデル名（既定 `qwen2.5:7b`） |
 | `WEBHOOK_URL` | 完了通知 Webhook |
+| `MM_AUTH_SECRET` | JWT 署名用秘密鍵。**未指定時は Compose 内蔵フォールバックで認証 ON**。本番は独自の長いランダム文字列を推奨 |
+| `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` | 任意。API 起動時にユーザー 0 件なら最初の管理者を自動登録 |
+| `MM_AUTH_TOKEN_HOURS` | JWT 有効時間（既定 168） |
+| `MM_AUTH_SELF_REGISTER` | `1`（既定）で 1 人目以降が **自分で新規登録** 可能。`0` / `false` で無効（管理者追加のみ） |
 | `VITE_DEV_API_PROXY` | フロント開発時、`/api` のプロキシ先（既定 `http://127.0.0.1:8000`） |
 
 `frontend/nginx.conf` の `api:8000` や Compose のサービス名 **`redis`** は **コンテナ間の DNS 名**であり、特定の実サーバー名を直書きしているわけではありません。
