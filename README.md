@@ -137,6 +137,13 @@ docker exec ollama-server ollama pull qwen2.5:7b
 
 `frontend/nginx.conf` の `api:8000` や Compose のサービス名 **`redis`** は **コンテナ間の DNS 名**であり、特定の実サーバー名を直書きしているわけではありません。
 
+### 画面が真っ白になる（Docker 更新・再ビルド直後）
+
+- **ブラウザのキャッシュ**: 古い `index.html` が残り、存在しない `/assets/*.js` を読みに行っていることが多い。**スーパーリロード**（Ctrl+Shift+R 等）かキャッシュ削除を試す。
+- **Nginx**: `frontend/nginx.conf` では `index.html` を再検証させるヘッダを付与している。**フロントイメージを再ビルド**（`docker compose build frontend` または `server-rebuild.sh`）して反映する。
+- **開発者ツール（F12）→ ネットワーク**: `index.html` や `/assets/` の JS が **404** になっていないか確認する。
+- **API**: `docker compose ps` で **`mm-api`** が Up か。落ちていると API は 502 になりがちだが、通常は「読み込み中」のあとエラー表示になりやすい。
+
 ## ローカルパイプライン (上級者向け)
 
 Webアプリを使わず、コマンドラインから議事録を作成することも可能です。長時間動画のバッチ処理や、音声認識済みのSRTファイルを利用する場合に便利です。

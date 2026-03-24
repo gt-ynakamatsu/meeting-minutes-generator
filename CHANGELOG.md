@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.4
+
+- **frontend (Nginx)**: `index.html` のキャッシュ抑止と `/assets/` の長期キャッシュを設定（再デプロイ後の真っ白画面の予防）。README にトラブルシューティングを追記
+
 ## 2.3.3
 
 - **server-rebuild**: イメージ掃除を **`docker compose down --rmi local`（この compose のビルドイメージのみ）**に限定。ホスト全体の `docker image prune` / `builder prune` は既定では実行しない（必要なら `GLOBAL_IMAGE_PRUNE` / `GLOBAL_BUILDER_PRUNE`）
