@@ -16,7 +16,7 @@ import re
 from faster_whisper import WhisperModel
 import torch
 import database as db
-from moviepy.editor import VideoFileClip
+from moviepy.editor import AudioFileClip, VideoFileClip
 import uuid
 import shutil
 
@@ -33,6 +33,37 @@ def _maybe_send_completion_email(to_addr: str, filename: str, task_id: str) -> N
         logger.warning("メール通知をスキップ（backend.smtp_notify を読み込めません）: %s", e)
         return
     send_task_completion_email(to_addr, filename, task_id)
+
+
+def _notify_task_failure(
+    notification_type: str,
+    email: str,
+    filename: str,
+    webhook_url,
+    detail: str,
+    task_id: str,
+) -> None:
+    """処理失敗時の webhook / メール（browser はフロントのポーリングで通知）。"""
+    if (notification_type or "") in ("", "browser", "none"):
+        return
+    text_detail = (detail or "").strip()[:1200]
+    final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
+    if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
+        try:
+            text = f"❌ **議事録処理に失敗しました（ジョブは破棄されました）**\nファイル: {filename}\n\n{text_detail}"
+            requests.post(
+                final_webhook_url,
+                json={"text": text, "email": email, "filename": filename},
+            )
+        except Exception:
+            pass
+    elif notification_type == "email" and email:
+        try:
+            from backend.smtp_notify import send_task_failure_email
+        except ImportError as e:
+            logger.warning("失敗メールをスキップ（backend.smtp_notify を読み込めません）: %s", e)
+            return
+        send_task_failure_email(email, filename, task_id, text_detail)
 
 
 def _ollama_generate_url():
@@ -414,12 +445,15 @@ def process_video_task(
 
     ext = os.path.splitext(file_path)[1].lower()
     is_transcript = ext in (".txt", ".srt")
+    is_audio_only = ext in (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".m4b")
 
     def fail(msg, exc_info=False):
         if _record_cancelled(task_id, owner_username or ""):
             _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
             return
-        db.update_record(task_id, owner_username or "", status=f"Error: {msg}")
+        err_summary = f"【処理エラー】\n{msg}"
+        db.update_record(task_id, owner_username or "", status="cancelled", summary=err_summary)
+        _notify_task_failure(notification_type, email, filename, webhook_url, msg, task_id)
         _cleanup_user_prompts(task_id)
         try:
             if os.path.exists(audio_path):
@@ -451,13 +485,25 @@ def process_video_task(
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
                 return
             db.update_record(task_id, owner_username or "", status="processing:extracting_audio")
-            video = None
-            try:
-                video = VideoFileClip(file_path)
-                video.audio.write_audiofile(audio_path, logger=None)
-            finally:
-                if video:
-                    video.close()
+            if is_audio_only:
+                audio_clip = None
+                try:
+                    audio_clip = AudioFileClip(file_path)
+                    audio_clip.write_audiofile(audio_path, logger=None)
+                finally:
+                    if audio_clip is not None:
+                        audio_clip.close()
+            else:
+                video = None
+                try:
+                    video = VideoFileClip(file_path)
+                    if video.audio is None:
+                        fail("動画に音声トラックがありません")
+                        return
+                    video.audio.write_audiofile(audio_path, logger=None)
+                finally:
+                    if video is not None:
+                        video.close()
 
             if _record_cancelled(task_id, owner_username or ""):
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
@@ -589,7 +635,10 @@ def process_video_task(
         if _record_cancelled(task_id, owner_username or ""):
             _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
             return
-        db.update_record(task_id, owner_username or "", status=f"Error: {str(e)}")
+        err_text = str(e)
+        err_summary = f"【処理エラー】\n{err_text}"
+        db.update_record(task_id, owner_username or "", status="cancelled", summary=err_summary)
+        _notify_task_failure(notification_type, email, filename, webhook_url, err_text, task_id)
         _cleanup_user_prompts(task_id)
         try:
             if os.path.exists(audio_path):

@@ -551,7 +551,7 @@ def purge_all_minutes_archives() -> int:
 
 
 def discard_task(task_id: str, owner: str = "") -> None:
-    """pending / processing* のジョブを cancelled にする。完了・エラー・破棄済みは不可。"""
+    """pending / processing* / Error 終了を cancelled にする。完了・破棄済みは不可。Error の場合は理由を summary に残す。"""
     row = get_record(task_id, owner or "")
     if not row:
         raise KeyError(task_id)
@@ -559,7 +559,9 @@ def discard_task(task_id: str, owner: str = "") -> None:
     if st in ("completed", "cancelled"):
         raise ValueError("すでに終了しているため破棄できません")
     if st.startswith("Error"):
-        raise ValueError("エラー終了済みのため破棄できません")
+        err_detail = st[6:].strip() if st.lower().startswith("error:") else st
+        update_record(task_id, owner or "", status="cancelled", summary=f"【処理エラー】\n{err_detail}")
+        return
     if st != "pending" and not st.startswith("processing"):
         raise ValueError("破棄できない状態です")
     update_record(task_id, owner or "", status="cancelled")
@@ -594,7 +596,9 @@ def get_recent_records(
     if sf == "completed":
         clauses.append("status = 'completed'")
     elif sf == "error":
-        clauses.append("status LIKE 'Error%'")
+        clauses.append(
+            "(status LIKE 'Error%' OR (status = 'cancelled' AND summary LIKE '【処理エラー】%'))"
+        )
     elif sf == "cancelled":
         clauses.append("status = 'cancelled'")
     elif sf == "processing":

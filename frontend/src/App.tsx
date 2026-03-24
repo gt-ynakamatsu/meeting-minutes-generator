@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import {
   adminCreateUser,
   adminDeleteUser,
@@ -34,6 +36,84 @@ import {
 import { jobStatusShortLabel, parseJobStatus } from "./jobStatus";
 
 const LS_PENDING = "mm_pending_tasks";
+/** ワーカーがエラー破棄したレコードの summary 先頭（一覧の「エラー」フィルタと一致） */
+const TASK_ERROR_SUMMARY_PREFIX = "【処理エラー】";
+
+function taskErrorDetailFromSummary(raw: string): string {
+  const t = (raw || "").trim();
+  if (!t.startsWith(TASK_ERROR_SUMMARY_PREFIX)) return t;
+  const rest = t.slice(TASK_ERROR_SUMMARY_PREFIX.length).replace(/^\s*\n?/, "").trim();
+  return rest || t;
+}
+
+function clipForDesktopNotification(text: string, maxLen = 900): string {
+  const t = (text || "").trim();
+  if (t.length <= maxLen) return t;
+  return `${t.slice(0, maxLen)}…`;
+}
+
+/** Whisper / PyTorch / CUDA の GPU メモリ・割り当て系とみなす（ログ全文に対して判定） */
+function looksLikeGpuMemoryError(text: string): boolean {
+  const s = (text || "").toLowerCase();
+  if (!s.trim()) return false;
+  if (s.includes("out of memory") || s.includes("out-of-memory")) return true;
+  if (/\boom\b/.test(s)) return true;
+  if (s.includes("cuda error") || s.includes("cudnn") || s.includes("cublas")) return true;
+  if (s.includes("cuda failed")) return true;
+  if (s.includes("torch.cuda.outofmemory")) return true;
+  if (s.includes("allocation failed") || s.includes("failed to allocate")) return true;
+  if (s.includes("gpu memory") || s.includes("vram")) return true;
+  if (s.includes("cublas_status_alloc_failed")) return true;
+  return false;
+}
+
+function ErrorUserGuidance({ errorText }: { errorText: string }) {
+  const gpu = looksLikeGpuMemoryError(errorText);
+  return (
+    <p
+      className="muted"
+      style={{
+        margin: "0.75rem 0 0",
+        fontSize: "0.9rem",
+        lineHeight: 1.55,
+        padding: "0.55rem 0.65rem",
+        borderRadius: 6,
+        background: "rgba(0,0,0,0.04)",
+      }}
+    >
+      {gpu ? (
+        <>
+          このエラーは <strong>GPU のメモリ不足</strong> などが原因の可能性があります。ワーカー側の環境変数（例:{" "}
+          <code>WHISPER_MODEL</code> を <code>small</code> に、<code>WHISPER_COMPUTE_TYPE</code> を軽い設定に）を見直したうえで、
+          <strong>同じファイルを再アップロードしてやり直してください</strong>。
+        </>
+      ) : (
+        <>
+          このエラーは種類が特定できないため、<strong>上記のログ内容を控えたうえで管理者にお問い合わせください</strong>。
+        </>
+      )}
+    </p>
+  );
+}
+
+function TroubleshootingHints() {
+  return (
+    <details style={{ marginTop: "0.5rem" }}>
+      <summary>トラブルシューティング</summary>
+      <ul className="muted" style={{ fontSize: "0.85rem" }}>
+        <li>
+          GPU / CUDA: 動画・音声では Whisper が GPU を使います。「out of memory」のときはワーカーの環境変数で{" "}
+          <code>WHISPER_MODEL=small</code> や <code>WHISPER_COMPUTE_TYPE=int8_float16</code> を試す（詳細は README /{" "}
+          <code>.env.example</code>）。
+        </li>
+        <li>Ollama: モデルが pull 済みか、`OLLAMA_BASE_URL` を確認してください。</li>
+        <li>OpenAI: API キー・上限（429）を確認してください。</li>
+        <li>テキスト / SRT: UTF-8 推奨。SRT のタイムコード形式を確認してください。</li>
+        <li>カスタムプロンプト: `{"{"}CHUNK_TEXT{"}"}` / `{"{"}EXTRACTED_JSON{"}"}` の有無。</li>
+      </ul>
+    </details>
+  );
+}
 
 function formatDbDateTime(value: string | null | undefined): string {
   if (value == null || String(value).trim() === "") return "—";
@@ -243,6 +323,27 @@ function savePending(ids: string[]) {
   localStorage.setItem(LS_PENDING, JSON.stringify(ids));
 }
 
+/** 社内議事録テンプレ（罫線・【】見出し）— Markdown の単一改行が潰れるため pre-wrap でそのまま出す */
+function looksLikeMinutesTemplateMd(s: string): boolean {
+  const t = s.slice(0, 1500);
+  if (t.includes("社内会議議事録") || t.includes("顧客会議議事録")) return true;
+  if (t.includes("━━━━━━━━")) return true;
+  if (t.includes("【議事内容】")) return true;
+  if (/【\s*議/.test(t)) return true;
+  return false;
+}
+
+function MinutesMarkdownOrTemplate({ text }: { text: string }) {
+  if (looksLikeMinutesTemplateMd(text)) {
+    return <div className="minutes-template-text">{text}</div>;
+  }
+  return (
+    <div className="minutes-markdown">
+      <ReactMarkdown remarkPlugins={[remarkBreaks]}>{text}</ReactMarkdown>
+    </div>
+  );
+}
+
 function MinutesBody({ text }: { text: string }) {
   if (!text || text === "None") {
     return <p className="muted">詳細な議事録データが作成されていません。</p>;
@@ -300,12 +401,89 @@ function MinutesBody({ text }: { text: string }) {
           </>
         ) : null}
         {!decisions?.length && !issues?.length && !items?.length && !notes?.length ? (
-          <ReactMarkdown>{text}</ReactMarkdown>
+          <MinutesMarkdownOrTemplate text={text} />
         ) : null}
       </div>
     );
   } catch {
-    return <ReactMarkdown>{text}</ReactMarkdown>;
+    return <MinutesMarkdownOrTemplate text={text} />;
+  }
+}
+
+function escapeForHtmlText(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+const POPUP_PREVIEW_STYLES = `body{margin:0;background:#f6faf7;color:#1a1a1a;}
+.popup-root{box-sizing:border-box;padding:1rem 1.35rem;max-width:52rem;margin:0 auto;font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;}
+.popup-title{font-size:1.05rem;margin:0 0 1rem;color:#1b4332;font-weight:700;line-height:1.4;word-break:break-word;}
+.muted{color:#5c6f64;}
+.minutes-json h4{margin:1rem 0 0.35rem;color:#1b4332;font-size:0.95rem;}
+.minutes-json ul{margin:0.25rem 0 0.65rem;padding-left:1.35rem;}
+.minutes-json li{margin:0.2rem 0;}
+.popup-body h1,.popup-body h2,.popup-body h3{color:#1b4332;margin:1rem 0 0.45rem;line-height:1.35;}
+.popup-body h1{font-size:1.2rem;}
+.popup-body h2{font-size:1.05rem;}
+.popup-body h3{font-size:1rem;}
+.popup-body p{margin:0.5rem 0;}
+.popup-body ul,.popup-body ol{padding-left:1.35rem;margin:0.5rem 0;}
+.popup-body blockquote{margin:0.5rem 0;padding-left:0.85rem;border-left:3px solid #95d5b2;color:#374151;}
+.popup-body code{background:#eef5f1;padding:0.12em 0.35em;border-radius:4px;font-size:0.9em;}
+.popup-body pre{background:#eef5f1;padding:0.75rem 1rem;border-radius:8px;overflow:auto;font-size:0.88rem;}
+.popup-body a{color:#2d6a4f;}
+.popup-fallback{white-space:pre-wrap;word-break:break-word;font-size:0.9rem;padding:0.5rem 0;}
+.minutes-template-text{white-space:pre-wrap;word-break:break-word;font-size:0.88rem;line-height:1.65;margin:0;}
+.minutes-markdown p{margin:0.2rem 0;}
+.minutes-markdown ul,.minutes-markdown ol{margin:0.35rem 0;padding-left:1.35rem;}`;
+
+/** プレビューと同じ内容を別ウィンドウに表示 */
+function openMinutesPreviewWindow(heading: string, bodyText: string) {
+  const t = (bodyText || "").trim();
+  if (!t || t === "None") {
+    window.alert("表示する議事録がありません。");
+    return;
+  }
+  const w = window.open("", "_blank", "width=1100,height=880");
+  if (!w) {
+    window.alert(
+      "別ウィンドウを開けませんでした。ブラウザでこのサイト（アドレスバー左の鍵アイコン等）からポップアップを許可してください。",
+    );
+    return;
+  }
+
+  const safeTitle = escapeForHtmlText(heading.slice(0, 200) || "議事録プレビュー");
+  const h1Text = (heading || "").trim() || "議事録プレビュー";
+
+  let bodyInner: string;
+  try {
+    bodyInner = renderToStaticMarkup(
+      <div className="popup-root">
+        <h1 className="popup-title">{h1Text}</h1>
+        <div className="popup-body">
+          <MinutesBody text={bodyText} />
+        </div>
+      </div>,
+    );
+  } catch (e) {
+    console.error("openMinutesPreviewWindow renderToStaticMarkup", e);
+    bodyInner = `<div class="popup-root"><h1 class="popup-title">${escapeForHtmlText(h1Text)}</h1><pre class="popup-fallback">${escapeForHtmlText(bodyText)}</pre></div>`;
+  }
+
+  const full = `<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>${safeTitle}</title><style>${POPUP_PREVIEW_STYLES}</style></head><body>${bodyInner}</body></html>`;
+
+  try {
+    w.document.open();
+    w.document.write(full);
+    w.document.close();
+    w.focus();
+  } catch (e) {
+    console.error("openMinutesPreviewWindow document.write", e);
+    w.close();
+    window.alert("別ウィンドウへの書き込みに失敗しました。ブラウザの設定を確認してください。");
   }
 }
 
@@ -341,7 +519,11 @@ function RecordCard({
   }, [row.context_json]);
 
   const statusStr = row.status != null ? String(row.status) : "";
-  const statusSummary = statusStr.startsWith("Error") ? "エラー" : jobStatusShortLabel(statusStr);
+  const errorStyleCancelled =
+    statusStr === "cancelled" && summary.trimStart().startsWith(TASK_ERROR_SUMMARY_PREFIX);
+  const workerErrorLogText = errorStyleCancelled ? taskErrorDetailFromSummary(summary) : "";
+  const statusSummary =
+    statusStr.startsWith("Error") || errorStyleCancelled ? "エラー" : jobStatusShortLabel(statusStr);
   const label = `${formatDbDateTime(row.created_at)} · ${(row.topic || "").trim() || "（議題なし）"} · ${row.filename} · ${statusSummary}`;
 
   return (
@@ -370,33 +552,47 @@ function RecordCard({
 
       {statusStr === "completed" ? (
         <>
-          <div className="tabs">
-            <button type="button" className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>
-              プレビュー
-            </button>
-            <button type="button" className={tab === "edit" ? "active" : ""} onClick={() => setTab("edit")}>
-              手直し・保存
-            </button>
-            <button type="button" className={tab === "raw" ? "active" : ""} onClick={() => setTab("raw")}>
-              書き起こし
-            </button>
+          <div className="tabs-record-toolbar">
+            <div className="tabs tabs--record tabs--record--modes" role="tablist" aria-label="表示モード">
+              <button type="button" className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>
+                プレビュー
+              </button>
+              <button type="button" className={tab === "edit" ? "active" : ""} onClick={() => setTab("edit")}>
+                手直し・保存
+              </button>
+              <button type="button" className={tab === "raw" ? "active" : ""} onClick={() => setTab("raw")}>
+                書き起こし
+              </button>
+            </div>
+            <div className="tabs--record__actions-row" aria-label="書き出し">
+              <button
+                type="button"
+                className="btn-record-outline"
+                title="現在保存されているプレビュー内容を別ウィンドウで開きます"
+                disabled={!summary.trim() || summary === "None"}
+                onClick={() => {
+                  const h = `${(row.topic || "").trim() || "（議題なし）"} · ${row.filename || "file"}`;
+                  openMinutesPreviewWindow(h, summary);
+                }}
+              >
+                別ウィンドウで開く
+              </button>
+              <button
+                type="button"
+                className="btn-record-outline"
+                title="議事録を Markdown ファイルでダウンロードします"
+                disabled={!summary.trim() || summary === "None"}
+                onClick={() =>
+                  void downloadExportMinutes(row.id, `minutes_${exportBasename(row)}.md`).catch((e) => alert(String(e)))
+                }
+              >
+                議事録をダウンロード（.md）
+              </button>
+            </div>
           </div>
           {tab === "preview" ? (
             <>
               <MinutesBody text={summary} />
-              {summary.trim() && summary !== "None" ? (
-                <p style={{ marginTop: "0.65rem" }}>
-                  <button
-                    type="button"
-                    className="btn-link"
-                    onClick={() =>
-                      void downloadExportMinutes(row.id, `minutes_${exportBasename(row)}.md`).catch((e) => alert(String(e)))
-                    }
-                  >
-                    議事録をダウンロード（.md）
-                  </button>
-                </p>
-              ) : null}
             </>
           ) : null}
           {tab === "edit" ? (
@@ -443,30 +639,44 @@ function RecordCard({
             </div>
           ) : null}
         </>
+      ) : statusStr === "cancelled" && errorStyleCancelled ? (
+        <div className="error-box">
+          <strong>エラー（ジョブは破棄済み）</strong>
+          <p className="muted" style={{ margin: "0.4rem 0 0", fontSize: "0.88rem" }}>
+            アップロードされた原稿ファイルはサーバから削除されています。以下はワーカーが記録したエラー内容です。
+          </p>
+          <div
+            className="task-error-detail"
+            style={{
+              marginTop: "0.65rem",
+              fontSize: "0.9rem",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              lineHeight: 1.5,
+            }}
+          >
+            {workerErrorLogText}
+          </div>
+          <ErrorUserGuidance errorText={workerErrorLogText} />
+          <TroubleshootingHints />
+        </div>
       ) : statusStr === "cancelled" ? (
         <div className="cancelled-box">
           <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
             このジョブは破棄されました。アップロードされた原稿ファイルはサーバから削除されています。
           </p>
+          {summary.trim() && summary !== "None" ? (
+            <pre className="muted" style={{ margin: "0.65rem 0 0", fontSize: "0.82rem", whiteSpace: "pre-wrap" }}>
+              {summary}
+            </pre>
+          ) : null}
         </div>
       ) : statusStr.startsWith("Error") ? (
         <div className="error-box">
           <strong>エラー</strong>
           <div>{statusStr}</div>
-          <details style={{ marginTop: "0.5rem" }}>
-            <summary>トラブルシューティング</summary>
-            <ul className="muted" style={{ fontSize: "0.85rem" }}>
-              <li>
-                GPU / CUDA: 動画・音声では Whisper が GPU を使います。「out of memory」のときはワーカーの環境変数で{" "}
-                <code>WHISPER_MODEL=small</code> や <code>WHISPER_COMPUTE_TYPE=int8_float16</code> を試す（詳細は README /{" "}
-                <code>.env.example</code>）。
-              </li>
-              <li>Ollama: モデルが pull 済みか、`OLLAMA_BASE_URL` を確認してください。</li>
-              <li>OpenAI: API キー・上限（429）を確認してください。</li>
-              <li>テキスト / SRT: UTF-8 推奨。SRT のタイムコード形式を確認してください。</li>
-              <li>カスタムプロンプト: `{"{"}CHUNK_TEXT{"}"}` / `{"{"}EXTRACTED_JSON{"}"}` の有無。</li>
-            </ul>
-          </details>
+          <ErrorUserGuidance errorText={statusStr} />
+          <TroubleshootingHints />
         </div>
       ) : (
         <div>
@@ -974,8 +1184,8 @@ function UploadDropIcon({ className }: { className?: string }) {
     <svg
       className={className}
       viewBox="0 0 24 24"
-      width="48"
-      height="48"
+      width="40"
+      height="40"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       aria-hidden
@@ -1013,6 +1223,7 @@ function AppMain({
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [queue, setQueue] = useState<RecordRow[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>(loadPending);
+  const errorNotifiedRef = useRef(new Set<string>());
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1159,14 +1370,52 @@ function AppMain({
         for (const id of pendingIds) {
           const r = await getRecord(id);
           const st = r.status != null ? String(r.status) : "";
+          const sum = r.summary != null ? String(r.summary) : "";
           if (st === "completed") {
+            errorNotifiedRef.current.delete(id);
             if (Notification.permission === "granted") {
-              new Notification("議事録ができました", { body: r.filename });
+              new Notification("議事録ができました", { body: r.filename || "" });
             }
             continue;
           }
-          if (st.startsWith("Error")) continue;
-          if (st === "cancelled") continue;
+          if (st.startsWith("Error")) {
+            if (!errorNotifiedRef.current.has(id)) {
+              errorNotifiedRef.current.add(id);
+              const errBody = st.replace(/^Error:\s*/i, "").trim();
+              if (Notification.permission === "granted") {
+                new Notification("議事録処理でエラーが発生しました（ジョブを破棄します）", {
+                  body: clipForDesktopNotification(errBody || r.filename || ""),
+                });
+              } else {
+                setMsg(`議事録処理でエラーが発生しました（破棄処理中）: ${errBody || r.filename || ""}`);
+              }
+            }
+            try {
+              await discardRecord(id);
+              errorNotifiedRef.current.delete(id);
+            } catch {
+              next.push(id);
+              continue;
+            }
+            continue;
+          }
+          if (st === "cancelled") {
+            if (sum.trimStart().startsWith(TASK_ERROR_SUMMARY_PREFIX)) {
+              if (!errorNotifiedRef.current.has(id)) {
+                errorNotifiedRef.current.add(id);
+                const body = taskErrorDetailFromSummary(sum);
+                if (Notification.permission === "granted") {
+                  new Notification("議事録処理でエラーが発生しました（ジョブは破棄されました）", {
+                    body: clipForDesktopNotification(body || r.filename || ""),
+                  });
+                } else {
+                  setMsg(`議事録処理でエラー（破棄済み）: ${body || r.filename || ""}`);
+                }
+              }
+            }
+            errorNotifiedRef.current.delete(id);
+            continue;
+          }
           next.push(id);
         }
         setPendingIds(next);
@@ -1177,6 +1426,7 @@ function AppMain({
       }
     };
     const h = window.setInterval(tick, 10_000);
+    void tick();
     return () => window.clearInterval(h);
   }, [pendingIds, refreshRecords, refreshQueue]);
 
@@ -1317,7 +1567,7 @@ function AppMain({
         </div>
         <h1>AI 議事録アーカイブ</h1>
         <p className="muted hero--tagline">
-          左パネルで会議情報・LLM・通知などを入力。右の上段の枠をクリックするかドラッグ＆ドロップでファイルを選び「解析をキューに追加」。その下に処理キューとアーカイブ（アーカイブは約 5 件表示でそれ以上はスクロール。狭い画面は上から縦並び）。
+          左パネルで会議情報・LLM・通知などを入力。右の上段の枠をクリックするかドラッグ＆ドロップでファイルを選び「解析をキューに追加」。その下に処理キューとアーカイブ（アーカイブ一覧は画面下の広い領域に表示され、内部でスクロール。狭い画面は上から縦並び）。
         </p>
       </header>
 

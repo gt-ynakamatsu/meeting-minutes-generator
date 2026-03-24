@@ -53,6 +53,12 @@ body {
   gap: 0.85rem;
   min-height: 0;
   min-width: 0;
+  align-content: stretch;
+}
+
+.layout-columns > main.main--stack {
+  min-height: 0;
+  height: 100%;
 }
 
 @media (max-width: 960px) {
@@ -236,7 +242,7 @@ body {
 }
 
 .main-pane-top {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
@@ -255,11 +261,12 @@ body {
 .main-queue .queue {
   flex: 1;
   min-height: 0;
+  max-height: min(30vh, 280px);
   overflow-y: auto;
 }
 
 .main-pane-archive {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -267,10 +274,10 @@ body {
   max-width: 100%;
 }
 
-/* 閉じたカードのサマリー行でおよそ 5 件分を常時表示し、それ以上はスクロール */
+/* メイン列の余白をアーカイブ一覧が占有し、内部だけスクロール */
 .main-archive-scroll {
-  flex: 0 1 auto;
-  max-height: 19rem;
+  flex: 1 1 auto;
+  min-height: 14rem;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 0.25rem;
@@ -281,13 +288,24 @@ body {
 }
 
 @media (max-width: 520px) {
-  .main-file-drop {
-    min-height: 9rem;
-    padding: 1rem 0.65rem;
+  .layout-columns > main.main--stack {
+    height: auto;
+    min-height: 0;
+  }
+
+  .main-pane-archive {
+    flex: 0 0 auto;
   }
 
   .main-archive-scroll {
-    max-height: min(19rem, 38vh);
+    flex: 0 1 auto;
+    min-height: 12rem;
+    max-height: min(28rem, 52vh);
+  }
+
+  .main-file-drop {
+    min-height: 7.75rem;
+    padding: 0.85rem 0.6rem;
   }
 }
 
@@ -299,7 +317,7 @@ body {
 }
 
 .main-file-picker--upload {
-  padding: 0.65rem 0.85rem;
+  padding: 0.55rem 0.75rem;
   margin-bottom: 0;
   flex-shrink: 0;
 }
@@ -483,9 +501,9 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
-  gap: 0.35rem;
-  min-height: 11rem;
-  padding: 1.25rem 1rem;
+  gap: 0.3rem;
+  min-height: 8.25rem;
+  padding: 1rem 0.85rem;
   border: 2px dashed var(--border);
   border-radius: 12px;
   background: rgba(27, 67, 50, 0.04);
@@ -509,7 +527,9 @@ body {
 .main-file-drop__icon {
   color: var(--accent);
   opacity: 0.85;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0.1rem;
+  width: 40px;
+  height: 40px;
 }
 
 .main-file-drop__title {
@@ -610,6 +630,60 @@ body {
   margin: 0.5rem 0;
 }
 
+.tabs-record-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  margin: 0.5rem 0;
+}
+
+.tabs-record-toolbar > .tabs {
+  margin: 0;
+}
+
+.tabs--record {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tabs--record--modes {
+  margin: 0;
+}
+
+.tabs--record__actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+
+.tabs--record__actions-row .btn-record-outline {
+  box-sizing: border-box;
+  min-height: 2.15rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.8rem;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.tabs--record__actions-row .btn-record-outline:hover:not(:disabled) {
+  background: rgba(45, 106, 79, 0.08);
+}
+
+.tabs--record__actions-row .btn-record-outline:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .tabs button {
   border: 1px solid var(--border);
   background: #f4faf6;
@@ -628,6 +702,49 @@ body {
 .minutes-json h4 {
   margin: 0.5rem 0 0.25rem;
   color: var(--accent);
+}
+
+/* 議事録テンプレ（.md 相当）— 罫線・【】の改行をそのまま */
+.minutes-template-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  margin: 0;
+  color: var(--text);
+}
+
+/* 通常の Markdown 議事録（単一改行は remark-breaks） */
+.minutes-markdown {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.minutes-markdown p {
+  margin: 0.2rem 0;
+}
+
+.minutes-markdown ul,
+.minutes-markdown ol {
+  margin: 0.35rem 0;
+  padding-left: 1.35rem;
+}
+
+.minutes-markdown h1,
+.minutes-markdown h2,
+.minutes-markdown h3 {
+  color: var(--accent);
+  margin: 0.65rem 0 0.35rem;
+  font-size: 1rem;
+}
+
+.minutes-markdown pre {
+  overflow: auto;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(27, 67, 50, 0.06);
+  font-size: 0.85rem;
 }
 
 .error-box {
