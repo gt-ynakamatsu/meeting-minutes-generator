@@ -14,7 +14,7 @@ class MeetingContext(BaseModel):
 class TaskSubmitMetadata(BaseModel):
     email: str = ""
     webhook_url: Optional[str] = None
-    notification_type: Literal["browser", "webhook", "none"] = "browser"
+    notification_type: Literal["browser", "webhook", "email", "none"] = "browser"
     llm_provider: Literal["ollama", "openai"] = "ollama"
     ollama_model: str = "qwen2.5:7b"
     # 認証オフ時のみ使用。ログイン時はサーバに保存したキーを使います。
@@ -33,7 +33,7 @@ class SummaryPatch(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str = ""
+    email: str = ""
     password: str = ""
 
 
@@ -46,26 +46,28 @@ class AuthStatusResponse(BaseModel):
     auth_required: bool
     bootstrap_needed: bool
     self_register_allowed: bool = True
+    # MM_SMTP_HOST / MM_SMTP_FROM が揃っているとき True（メール通知が利用可能）
+    email_notify_available: bool = False
 
 
 class BootstrapRequest(BaseModel):
-    username: str = ""
+    email: str = ""
     password: str = ""
 
 
 class AuthMeResponse(BaseModel):
-    username: str
+    email: str
     is_admin: bool
 
 
 class AdminUserRow(BaseModel):
-    username: str
+    email: str
     is_admin: bool
     created_at: Optional[str] = None
 
 
 class AdminCreateUserRequest(BaseModel):
-    username: str = ""
+    email: str = ""
     password: str = ""
     is_admin: bool = False
 

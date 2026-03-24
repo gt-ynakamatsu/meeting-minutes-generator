@@ -3,6 +3,12 @@
 # プロジェクトを tar.gz に固めて scp → リモートで解凍（compose はしない）
 # UTF-8 / LF で保存
 #
+# 解凍後はサーバで手動:  cd <プロジェクト直下>
+#   docker compose down
+#   docker compose up -d --build
+# （deploy.sh を使わない運用向け。--build なしだとイメージが古く 502 / キュー待ちのままになりやすい）
+# 詳細は README「tar.gz で転送して手動 docker compose」参照。
+#
 # 使い方:
 #   ./scripts/tar-scp.sh
 #   ./scripts/tar-scp.sh user@host

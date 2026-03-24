@@ -1,5 +1,6 @@
 import os
 import time
+import logging
 
 # Redis 起動待ち（ワーカーが tasks を import するときのみ実行）
 time.sleep(10)
@@ -21,6 +22,18 @@ import shutil
 
 # Ollama Configuration（Compose の worker では OLLAMA_BASE_URL を注入。ホストで Celery する場合は 127.0.0.1）
 
+logger = logging.getLogger(__name__)
+
+
+def _maybe_send_completion_email(to_addr: str, filename: str, task_id: str) -> None:
+    """モジュール先頭で backend を import するとワーカー起動に失敗する環境があるため遅延 import。"""
+    try:
+        from backend.smtp_notify import send_task_completion_email
+    except ImportError as e:
+        logger.warning("メール通知をスキップ（backend.smtp_notify を読み込めません）: %s", e)
+        return
+    send_task_completion_email(to_addr, filename, task_id)
+
 
 def _ollama_generate_url():
     base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -35,7 +48,19 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 CHUNK_SEC = 75
 CHAR_CHUNK = 6000
 
+_APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_PROMPT_EXTRACT = os.path.join(_APP_ROOT, "prompts", "prompt_extract.txt")
+DEFAULT_PROMPT_MERGE = os.path.join(_APP_ROOT, "prompts", "prompt_merge.txt")
+
 _PRESETS_CACHE = None
+
+
+def _whisper_runtime():
+    """faster-whisper の設定。VRAM 不足時は WHISPER_MODEL=small や WHISPER_COMPUTE_TYPE=int8_float16 等を試す。"""
+    model = (os.getenv("WHISPER_MODEL") or "medium").strip() or "medium"
+    device = (os.getenv("WHISPER_DEVICE") or "cuda").strip() or "cuda"
+    compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or "float16").strip() or "float16"
+    return model, device, compute_type
 
 
 def load_builtin_presets():
@@ -356,6 +381,12 @@ def process_video_task(
     prompt_paths=None,
     owner_username="",
 ):
+    # notification_type は API が llm_config に同梱（Celery kwargs だと古いワーカーが TypeError になるため）
+    _lc = dict(llm_config) if isinstance(llm_config, dict) else {}
+    notification_type = _lc.pop("notification_type", "browser")
+    llm_config = _lc if _lc else None
+
+    db.purge_expired_minutes(owner_username or "")
     record = db.get_record(task_id, owner_username or "")
     if not record:
         return
@@ -374,8 +405,8 @@ def process_video_task(
 
     extract_path = prompt_paths.get("extract") if prompt_paths else None
     merge_path = prompt_paths.get("merge") if prompt_paths else None
-    prompt_extract = load_prompt(extract_path) if extract_path else load_prompt("prompt_extract.txt")
-    prompt_merge = load_prompt(merge_path) if merge_path else load_prompt("prompt_merge.txt")
+    prompt_extract = load_prompt(extract_path) if extract_path else load_prompt(DEFAULT_PROMPT_EXTRACT)
+    prompt_merge = load_prompt(merge_path) if merge_path else load_prompt(DEFAULT_PROMPT_MERGE)
 
     preset_ex, preset_mg = preset_hints_for_record(record)
     extract_shell = _assemble_extract_prompt(prompt_extract, record, preset_ex)
@@ -432,11 +463,17 @@ def process_video_task(
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
                 return
             db.update_record(task_id, owner_username or "", status="processing:transcribing")
-            model = WhisperModel("medium", device="cuda", compute_type="float16")
+            wm, wd, wct = _whisper_runtime()
+            logger.info("Whisper: model=%s device=%s compute_type=%s", wm, wd, wct)
+            model = WhisperModel(wm, device=wd, compute_type=wct)
             raw_segments, _ = model.transcribe(audio_path)
             segments = normalize_to_segments(list(raw_segments))
             del model
-            torch.cuda.empty_cache()
+            if wd == "cuda":
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
             chunks_for_ai, raw_transcript = build_chunks_from_segments(segments)
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
@@ -524,7 +561,7 @@ def process_video_task(
         db.update_record(task_id, owner_username or "", status="completed", summary=final_summary)
 
         final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
-        if email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
+        if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
             msg = f"✅ **議事録作成完了**\nファイル: {filename}\n[アーカイブを確認]"
             try:
                 requests.post(
@@ -533,6 +570,8 @@ def process_video_task(
                 )
             except Exception:
                 pass
+        elif notification_type == "email" and email:
+            _maybe_send_completion_email(email, filename, task_id)
 
         try:
             if os.path.exists(audio_path):

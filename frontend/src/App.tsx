@@ -456,7 +456,11 @@ function RecordCard({
           <details style={{ marginTop: "0.5rem" }}>
             <summary>トラブルシューティング</summary>
             <ul className="muted" style={{ fontSize: "0.85rem" }}>
-              <li>GPU / CUDA: 動画・音声モードでは Whisper が GPU を使います。</li>
+              <li>
+                GPU / CUDA: 動画・音声では Whisper が GPU を使います。「out of memory」のときはワーカーの環境変数で{" "}
+                <code>WHISPER_MODEL=small</code> や <code>WHISPER_COMPUTE_TYPE=int8_float16</code> を試す（詳細は README /{" "}
+                <code>.env.example</code>）。
+              </li>
               <li>Ollama: モデルが pull 済みか、`OLLAMA_BASE_URL` を確認してください。</li>
               <li>OpenAI: API キー・上限（429）を確認してください。</li>
               <li>テキスト / SRT: UTF-8 推奨。SRT のタイムコード形式を確認してください。</li>
@@ -546,8 +550,13 @@ function BootstrapPanel({ onDone }: { onDone: () => void }) {
             })();
           }}
         >
-          <label>ユーザー名</label>
-          <input value={u} onChange={(e) => setU(e.target.value)} autoComplete="username" />
+          <label>メールアドレス（ログイン ID）</label>
+          <input
+            type="email"
+            value={u}
+            onChange={(e) => setU(e.target.value)}
+            autoComplete="email"
+          />
           <label>パスワード（8 文字以上）</label>
           <input type="password" value={p} onChange={(e) => setP(e.target.value)} autoComplete="new-password" />
           <label>パスワード（確認）</label>
@@ -558,14 +567,14 @@ function BootstrapPanel({ onDone }: { onDone: () => void }) {
           </button>
         </form>
         <p className="muted" style={{ marginTop: "1.25rem", fontSize: "0.85rem" }}>
-          代わりに環境変数 <code>MM_BOOTSTRAP_ADMIN_USER</code> / <code>MM_BOOTSTRAP_ADMIN_PASSWORD</code> で初期ユーザーを作ることもできます。
+          代わりに環境変数 <code>MM_BOOTSTRAP_ADMIN_USER</code>（メールアドレス） / <code>MM_BOOTSTRAP_ADMIN_PASSWORD</code> で初期ユーザーを作ることもできます。
         </p>
       </main>
     </div>
   );
 }
 
-function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
+function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
   const [rows, setRows] = useState<AdminUserRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -598,21 +607,21 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                <th style={{ textAlign: "left", padding: "0.5rem 0" }}>ユーザー</th>
+                <th style={{ textAlign: "left", padding: "0.5rem 0" }}>メールアドレス</th>
                 <th style={{ textAlign: "left", padding: "0.5rem" }}>管理者権限</th>
                 <th style={{ textAlign: "right", padding: "0.5rem 0" }}>操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.username} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                <tr key={r.email} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
                   <td style={{ padding: "0.5rem 0" }}>
-                    <code>{r.username}</code>
-                    {r.username === selfUsername ? <span className="muted"> （あなた）</span> : null}
+                    <code>{r.email}</code>
+                    {r.email === selfEmail ? <span className="muted"> （あなた）</span> : null}
                   </td>
                   <td style={{ padding: "0.5rem" }}>{r.is_admin ? "はい" : "—"}</td>
                   <td style={{ padding: "0.5rem 0", textAlign: "right", whiteSpace: "nowrap" }}>
-                    {editingPw === r.username ? (
+                    {editingPw === r.email ? (
                       <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center", justifyContent: "flex-end" }}>
                         <input
                           type="password"
@@ -629,7 +638,7 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
                               setErr(null);
                               setMsg(null);
                               try {
-                                await adminResetPassword(r.username, pwNew);
+                                await adminResetPassword(r.email, pwNew);
                                 setEditingPw(null);
                                 setPwNew("");
                                 setMsg("パスワードを更新しました。");
@@ -655,7 +664,7 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
                       </span>
                     ) : (
                       <>
-                        <button type="button" className="btn-link" onClick={() => { setEditingPw(r.username); setPwNew(""); }}>
+                        <button type="button" className="btn-link" onClick={() => { setEditingPw(r.email); setPwNew(""); }}>
                           パスワード
                         </button>
                         <button
@@ -666,7 +675,7 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
                               setErr(null);
                               setMsg(null);
                               try {
-                                await adminSetRole(r.username, !r.is_admin);
+                                await adminSetRole(r.email, !r.is_admin);
                                 setMsg("管理者権限を更新しました。");
                                 load();
                               } catch (e) {
@@ -681,14 +690,14 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
                           type="button"
                           className="btn-link"
                           style={{ color: "var(--danger, #b00)" }}
-                          disabled={r.username === selfUsername}
+                          disabled={r.email === selfEmail}
                           onClick={() => {
-                            if (!window.confirm(`ユーザー「${r.username}」を削除しますか？`)) return;
+                            if (!window.confirm(`このメールアドレス（${r.email}）のユーザーを削除しますか？`)) return;
                             void (async () => {
                               setErr(null);
                               setMsg(null);
                               try {
-                                await adminDeleteUser(r.username);
+                                await adminDeleteUser(r.email);
                                 setMsg("ユーザーを削除しました。");
                                 load();
                               } catch (e) {
@@ -710,8 +719,8 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
 
       <h3 style={{ marginTop: "1.5rem" }}>ユーザーを追加</h3>
       <div className="auth-form" style={{ maxWidth: "100%" }}>
-        <label>ユーザー名</label>
-        <input value={nu} onChange={(e) => setNu(e.target.value)} autoComplete="off" />
+        <label>メールアドレス（ログイン ID）</label>
+        <input type="email" value={nu} onChange={(e) => setNu(e.target.value)} autoComplete="off" />
         <label>初期パスワード（8 文字以上）</label>
         <input type="password" value={np} onChange={(e) => setNp(e.target.value)} autoComplete="new-password" />
         <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
@@ -727,7 +736,7 @@ function AdminUserPanel({ selfUsername }: { selfUsername: string }) {
               setErr(null);
               setMsg(null);
               try {
-                await adminCreateUser({ username: nu.trim(), password: np, is_admin: na });
+                await adminCreateUser({ email: nu.trim().toLowerCase(), password: np, is_admin: na });
                 setNu("");
                 setNp("");
                 setNa(false);
@@ -775,8 +784,8 @@ function LoginPanel({
       <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)}>
         <p className="muted" style={{ marginTop: 0 }}>
           {selfRegisterAllowed
-            ? "ログインまたは新規登録で入れます。右上のアイコンからメニューを開き、「ログインフォームへ」でユーザー名欄にフォーカスできます。"
-            : "ユーザー名とパスワードを入力してログインしてください。アカウントは管理者が発行します。右上のアイコンからメニューを開き、「ログインフォームへ」でフォームにフォーカスできます。"}
+            ? "ログインまたは新規登録で入れます。右上のアイコンからメニューを開き、「ログインフォームへ」でメールアドレス欄にフォーカスできます。"
+            : "メールアドレスとパスワードを入力してログインしてください。アカウントは管理者が発行します。右上のアイコンからメニューを開き、「ログインフォームへ」でフォームにフォーカスできます。"}
         </p>
       </SettingsDrawer>
       <main className="main auth-form" style={{ maxWidth: 420, margin: "2rem auto" }}>
@@ -784,7 +793,7 @@ function LoginPanel({
         <p className="muted">
           {mode === "login"
             ? "アカウントをお持ちの方はログインしてください。"
-            : "ユーザー名とパスワードを決めて登録します（一般ユーザー）。パスワードは 8 文字以上です。"}
+            : "メールアドレスとパスワードを決めて登録します（一般ユーザー）。パスワードは 8 文字以上です。"}
         </p>
         {selfRegisterAllowed ? (
           <div className="auth-mode-tabs" role="tablist" aria-label="ログインまたは登録">
@@ -843,12 +852,13 @@ function LoginPanel({
             })();
           }}
         >
-          <label>ユーザー名</label>
+          <label>メールアドレス</label>
           <input
             ref={userRef}
+            type="email"
             value={u}
             onChange={(e) => setU(e.target.value)}
-            autoComplete={mode === "login" ? "username" : "username"}
+            autoComplete="email"
           />
           <label>パスワード{mode === "register" ? "（8 文字以上）" : ""}</label>
           <input
@@ -935,6 +945,7 @@ export default function App() {
     <AppMain
       showLogout={showLogout}
       serverOpenaiMode={authStatus.auth_required}
+      emailNotifyAvailable={authStatus.email_notify_available === true}
       authNonce={authNonce}
       onLogout={() => {
         setStoredToken(null);
@@ -947,11 +958,13 @@ export default function App() {
 function AppMain({
   showLogout,
   serverOpenaiMode,
+  emailNotifyAvailable,
   authNonce,
   onLogout,
 }: {
   showLogout: boolean;
   serverOpenaiMode: boolean;
+  emailNotifyAvailable: boolean;
   authNonce: number;
   onLogout: () => void;
 }) {
@@ -987,7 +1000,7 @@ function AppMain({
   const [llmProfileMsg, setLlmProfileMsg] = useState<string | null>(null);
   const [llmProfileErr, setLlmProfileErr] = useState<string | null>(null);
 
-  const [notification, setNotification] = useState<"browser" | "webhook" | "none">("browser");
+  const [notification, setNotification] = useState<"browser" | "webhook" | "email" | "none">("browser");
   const [email, setEmail] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
 
@@ -1098,9 +1111,17 @@ function AppMain({
     });
   }, [presets]);
 
+  const emailRecipientOk =
+    notification !== "email" ||
+    (emailNotifyAvailable &&
+      (!serverOpenaiMode
+        ? email.trim().length > 0
+        : email.trim().length > 0 || !!authMe?.email));
+
   const canSubmit =
     !!file &&
     (notification !== "webhook" || email.trim().length > 0) &&
+    emailRecipientOk &&
     (llmProvider !== "openai" ||
       (serverOpenaiMode ? openaiConfigured : openaiKey.trim().length > 0));
 
@@ -1316,18 +1337,48 @@ function AppMain({
           <h3>通知</h3>
           <select
             value={notification}
-            onChange={(e) => setNotification(e.target.value as "browser" | "webhook" | "none")}
+            onChange={(e) =>
+              setNotification(e.target.value as "browser" | "webhook" | "email" | "none")
+            }
           >
             <option value="browser">ブラウザ</option>
             <option value="webhook">Webhook</option>
+            <option value="email" disabled={!emailNotifyAvailable}>
+              メール（SMTP 設定時）
+            </option>
             <option value="none">なし</option>
           </select>
+          {!emailNotifyAvailable ? (
+            <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+              メール通知を使うには、サーバに <code>MM_SMTP_HOST</code> と <code>MM_SMTP_FROM</code> などを設定し、API・ワーカーを再起動してください。
+            </p>
+          ) : null}
           {notification === "webhook" ? (
             <>
               <label>メール（必須）</label>
               <input value={email} onChange={(e) => setEmail(e.target.value)} />
               <label>Webhook URL（任意）</label>
               <input value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} />
+            </>
+          ) : null}
+          {notification === "email" ? (
+            <>
+              {serverOpenaiMode && authMe?.email ? (
+                <p className="muted" style={{ fontSize: "0.88rem", margin: "0.35rem 0" }}>
+                  既定の通知先: <code>{authMe.email}</code>
+                  （別アドレスへ送る場合のみ下に入力）
+                </p>
+              ) : null}
+              <label>
+                {serverOpenaiMode && authMe?.email ? "別の通知先メール（任意）" : "通知先メール（必須）"}
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder={serverOpenaiMode && authMe?.email ? authMe.email : "name@example.com"}
+                autoComplete="email"
+              />
             </>
           ) : null}
 
@@ -1480,7 +1531,7 @@ function AppMain({
                 <h3>アカウント</h3>
                 {authMe ? (
                   <p style={{ margin: 0, fontSize: "0.92rem" }}>
-                    <code>{authMe.username}</code>
+                    <code>{authMe.email}</code>
                     {authMe.is_admin ? <span className="muted"> · 管理者</span> : null}
                   </p>
                 ) : (
@@ -1589,7 +1640,7 @@ function AppMain({
 
         {settingsTab === "admin" && serverOpenaiMode && authMe?.is_admin ? (
           <section className="settings-section">
-            <AdminUserPanel selfUsername={authMe.username} />
+            <AdminUserPanel selfEmail={authMe.email} />
           </section>
         ) : null}
       </SettingsDrawer>

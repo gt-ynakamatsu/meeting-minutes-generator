@@ -6,10 +6,11 @@ import sys
 import time
 
 # --- 設定 ---
-# ディレクトリ構成
+# ディレクトリ構成（README どおり `cd pipeline` 実行を想定）
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INPUT_DIR = os.path.join("work", "extracted")
 OUTPUT_FILE = os.path.join("output", "final_minutes.md")
-PROMPT_FILE = "prompt_merge.txt"
+PROMPT_FILE = os.path.join(_REPO_ROOT, "prompts", "prompt_merge.txt")
 
 # Ollama設定（tasks.py と同様に OLLAMA_BASE_URL で上書き）
 def _ollama_generate_url():

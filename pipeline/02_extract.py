@@ -7,10 +7,11 @@ import sys
 import time
 
 # --- 設定 ---
-# ディレクトリ構成
+# ディレクトリ構成（README どおり `cd pipeline` 実行を想定）
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INPUT_DIR = os.path.join("work", "chunks")
 OUTPUT_DIR = os.path.join("work", "extracted")
-PROMPT_FILE = "prompt_extract.txt"
+PROMPT_FILE = os.path.join(_REPO_ROOT, "prompts", "prompt_extract.txt")
 
 # Ollama設定（Compose ワーカーでは OLLAMA_BASE_URL が注入される。CLI はホストの localhost 想定）
 def _ollama_generate_url():

@@ -12,6 +12,42 @@ REGISTRY_DB_PATH = os.path.join(DATA_DIR, "registry.db")
 LEGACY_MINUTES_PATH = os.path.join(DATA_DIR, "minutes.db")
 
 
+def registry_login_normalize(s: str) -> str:
+    """ログイン ID（メール）を DB 照合用に正規化（前後空白除去・小文字）。"""
+    return (s or "").strip().lower()
+
+
+def validate_registry_login_email(s: str) -> None:
+    """users.username に格納するログイン ID としてのメール検証（registry_login_normalize 済みを想定）。"""
+    if not s:
+        raise ValueError("メールアドレスを入力してください")
+    if len(s) > 254:
+        raise ValueError("メールアドレスが長すぎます")
+    if s.count("@") != 1:
+        raise ValueError("メールアドレスの形式が正しくありません")
+    local, domain = s.split("@", 1)
+    if not local or not domain or len(local) > 64 or len(domain) > 253:
+        raise ValueError("メールアドレスの形式が正しくありません")
+    if "." not in domain:
+        raise ValueError("メールアドレスの形式が正しくありません")
+    if ".." in local or ".." in domain:
+        raise ValueError("メールアドレスの形式が正しくありません")
+    if local.startswith(".") or local.endswith(".") or domain.startswith(".") or domain.endswith("."):
+        raise ValueError("メールアドレスの形式が正しくありません")
+
+
+def minutes_retention_days() -> int:
+    """議事録の保持日数。MM_MINUTES_RETENTION_DAYS（未設定時 183≒半年）。0 以下で自動削除を無効。"""
+    raw = (os.getenv("MM_MINUTES_RETENTION_DAYS") or "").strip()
+    if not raw:
+        return 183
+    try:
+        n = int(raw, 10)
+    except ValueError:
+        return 183
+    return n
+
+
 def _auth_secret_configured() -> bool:
     return bool((os.getenv("MM_AUTH_SECRET") or "").strip())
 
@@ -109,6 +145,11 @@ def _try_bootstrap_admin_registry(conn):
     raw_pw = (os.getenv("MM_BOOTSTRAP_ADMIN_PASSWORD") or "").strip()
     if not user or not raw_pw:
         return
+    user_key = registry_login_normalize(user)
+    try:
+        validate_registry_login_email(user_key)
+    except ValueError:
+        return
     n = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     if n > 0:
         return
@@ -119,7 +160,7 @@ def _try_bootstrap_admin_registry(conn):
     h = bcrypt.hashpw(raw_pw.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
     conn.execute(
         "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
-        (user, h),
+        (user_key, h),
     )
 
 
@@ -186,12 +227,24 @@ def count_users() -> int:
 
 
 def get_user_by_username(username: str):
-    u = (username or "").strip()
-    if not u or not os.path.exists(REGISTRY_DB_PATH):
+    raw = (username or "").strip()
+    if not raw or not os.path.exists(REGISTRY_DB_PATH):
         return None
+    key = registry_login_normalize(raw)
     with sqlite3.connect(REGISTRY_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        return conn.execute("SELECT * FROM users WHERE username = ?", (u,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (key,)).fetchone()
+        if row is None and key != raw:
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (raw,)).fetchone()
+        return row
+
+
+def resolve_registry_username_for_mutation(login_id: str) -> Optional[str]:
+    """URL や入力から実際の users.username（主キー）を解決する（レガシー表記の大文字小文字差を吸収）。"""
+    row = get_user_by_username(login_id)
+    if not row:
+        return None
+    return str(row["username"])
 
 
 def get_user_openai_settings(username: str) -> Tuple[Optional[str], str]:
@@ -274,9 +327,8 @@ def bootstrap_registry_admin(username: str, password: str) -> None:
     """認証 DB にユーザーが 0 件のときだけ最初の管理者を 1 人登録する（並行リクエスト対策で IMMEDIATE ロック）。"""
     import bcrypt
 
-    u = (username or "").strip()
-    if not u or len(u) > 128:
-        raise ValueError("ユーザー名は 1〜128 文字にしてください")
+    u = registry_login_normalize(username)
+    validate_registry_login_email(u)
     raw_pw = (password or "").replace("\r", "")
     if len(raw_pw) < 8:
         raise ValueError("パスワードは 8 文字以上にしてください")
@@ -304,9 +356,8 @@ def bootstrap_registry_admin(username: str, password: str) -> None:
 def create_registry_user(username: str, password: str, *, is_admin: bool = False) -> None:
     import bcrypt
 
-    u = (username or "").strip()
-    if not u or len(u) > 128:
-        raise ValueError("ユーザー名は 1〜128 文字にしてください")
+    u = registry_login_normalize(username)
+    validate_registry_login_email(u)
     raw_pw = (password or "").replace("\r", "")
     if len(raw_pw) < 8:
         raise ValueError("パスワードは 8 文字以上にしてください")
@@ -376,6 +427,7 @@ def save_initial_task(
 ):
     init_minutes_db(owner)
     path = minutes_db_path(owner)
+    purge_expired_minutes_db_path(path)
     with sqlite3.connect(path) as conn:
         _ensure_minutes_schema(conn)
         conn.execute(
@@ -450,6 +502,54 @@ def cleanup_user_prompts_dir(task_id: str) -> None:
         pass
 
 
+def purge_expired_minutes_db_path(path: str) -> int:
+    """minutes.db 1 ファイル単位で、保持期限を過ぎたレコードと関連ファイルを削除。戻り値は削除した行数。"""
+    d = minutes_retention_days()
+    if d <= 0 or not path or not os.path.isfile(path):
+        return 0
+    cutoff = datetime.now() - timedelta(days=d)
+    try:
+        with sqlite3.connect(path) as conn:
+            _ensure_minutes_schema(conn)
+            cur = conn.execute(
+                """
+                SELECT id FROM records
+                WHERE created_at IS NOT NULL
+                  AND created_at < ?
+                  AND NOT (status = 'pending' OR status LIKE 'processing%')
+                """,
+                (cutoff,),
+            )
+            ids = [row[0] for row in cur.fetchall()]
+            for tid in ids:
+                remove_task_upload_files(tid)
+                cleanup_user_prompts_dir(tid)
+            if ids:
+                conn.executemany("DELETE FROM records WHERE id = ?", [(i,) for i in ids])
+        return len(ids)
+    except sqlite3.Error:
+        return 0
+
+
+def purge_expired_minutes(owner: str = "") -> int:
+    init_minutes_db(owner)
+    return purge_expired_minutes_db_path(minutes_db_path(owner))
+
+
+def purge_all_minutes_archives() -> int:
+    """全ユーザー分＋レガシー data/minutes.db をスキャンして期限切れを削除。戻り値は削除したレコード件数の合計。"""
+    total = 0
+    if os.path.isfile(LEGACY_MINUTES_PATH):
+        total += purge_expired_minutes_db_path(LEGACY_MINUTES_PATH)
+    base = os.path.join(DATA_DIR, "user_data")
+    if os.path.isdir(base):
+        for name in os.listdir(base):
+            p = os.path.join(base, name, "minutes.db")
+            if os.path.isfile(p):
+                total += purge_expired_minutes_db_path(p)
+    return total
+
+
 def discard_task(task_id: str, owner: str = "") -> None:
     """pending / processing* のジョブを cancelled にする。完了・エラー・破棄済みは不可。"""
     row = get_record(task_id, owner or "")
@@ -473,6 +573,7 @@ def get_recent_records(
     status_filter="",
 ):
     init_minutes_db(owner)
+    purge_expired_minutes_db_path(minutes_db_path(owner))
     limit = datetime.now() - timedelta(days=days)
     q = (search or "").strip()
     cat = (category or "").strip()
@@ -510,6 +611,7 @@ def get_recent_records(
 
 def get_active_queue_records(owner: str = "", days=7, limit=30):
     init_minutes_db(owner)
+    purge_expired_minutes_db_path(minutes_db_path(owner))
     since = datetime.now() - timedelta(days=days)
     path = minutes_db_path(owner)
     with sqlite3.connect(path) as conn:

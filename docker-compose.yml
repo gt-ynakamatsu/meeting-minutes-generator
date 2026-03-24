@@ -15,10 +15,19 @@ services:
       - CORS_ORIGINS=${MM_CORS_ORIGINS:-http://localhost:8085,http://127.0.0.1:8085,http://localhost:5173}
       # 未指定時はフォールバックで認証 ON（ユーザー別 data/user_data/<slug>/minutes.db）。本番は MM_AUTH_SECRET を openssl rand -hex 32 等で必ず差し替え。
       - MM_AUTH_SECRET=${MM_AUTH_SECRET:-meet-minutes-default-jwt-hs256-key-change-in-production-use-openssl-rand-hex-32}
+      # 初回のみ有効。ログイン ID 用のメールアドレス。
       - MM_BOOTSTRAP_ADMIN_USER=${MM_BOOTSTRAP_ADMIN_USER:-}
       - MM_BOOTSTRAP_ADMIN_PASSWORD=${MM_BOOTSTRAP_ADMIN_PASSWORD:-}
       - MM_AUTH_TOKEN_HOURS=${MM_AUTH_TOKEN_HOURS:-168}
       - MM_AUTH_SELF_REGISTER=${MM_AUTH_SELF_REGISTER:-1}
+      # 議事録の自動削除（日）。0 で無効。未指定時は 183（約半年）。
+      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-183}
+      # メール完了通知（任意）。設定時は worker と同じ SMTP 変数を渡す。
+      # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
+      # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
+      # - MM_SMTP_FROM=${MM_SMTP_FROM:-}
+      # - MM_SMTP_USER=${MM_SMTP_USER:-}
+      # - MM_SMTP_PASSWORD=${MM_SMTP_PASSWORD:-}
     volumes:
       - ./data:/app/data
       - ./downloads:/app/downloads
@@ -53,6 +62,16 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - WEBHOOK_URL=${WEBHOOK_URL:-YOUR_WEBHOOK_URL_HERE}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama-server:11434}
+      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-183}
+      # VRAM 不足 (CUDA OOM) 時: WHISPER_MODEL=small / WHISPER_COMPUTE_TYPE=int8_float16 など（.env で指定）
+      - WHISPER_MODEL=${WHISPER_MODEL:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
+      # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
+      # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
+      # - MM_SMTP_FROM=${MM_SMTP_FROM:-}
+      # - MM_SMTP_USER=${MM_SMTP_USER:-}
+      # - MM_SMTP_PASSWORD=${MM_SMTP_PASSWORD:-}
     networks:
       - default
       - llm-net

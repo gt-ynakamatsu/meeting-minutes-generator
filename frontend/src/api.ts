@@ -30,7 +30,7 @@ export interface MeetingContext {
 export interface TaskSubmitMetadata {
   email: string;
   webhook_url: string | null;
-  notification_type: "browser" | "webhook" | "none";
+  notification_type: "browser" | "webhook" | "email" | "none";
   llm_provider: "ollama" | "openai";
   ollama_model: string;
   openai_api_key: string | null;
@@ -68,15 +68,17 @@ export interface AuthStatus {
   bootstrap_needed: boolean;
   /** 1人目作成後に自分でアカウント登録できるか（API 未対応時は undefined で表示可） */
   self_register_allowed?: boolean;
+  /** MM_SMTP_* が設定されているとき true（メール通知が選べる） */
+  email_notify_available?: boolean;
 }
 
 export interface AuthMe {
-  username: string;
+  email: string;
   is_admin: boolean;
 }
 
 export interface AdminUserRow {
-  username: string;
+  email: string;
   is_admin: boolean;
   created_at: string | null;
 }
@@ -98,10 +100,64 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return res;
 }
 
+/** FastAPI の { "detail": ... } を人が読める文字列に。 */
+function parseFastApiDetail(body: string): string | null {
+  try {
+    const j = JSON.parse(body) as { detail?: unknown };
+    const d = j.detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      const parts = d.map((x) => {
+        if (x && typeof x === "object" && "msg" in x) return String((x as { msg: string }).msg);
+        return JSON.stringify(x);
+      });
+      return parts.join("\n");
+    }
+    if (d != null && typeof d === "object") return JSON.stringify(d);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function looksLikeHtml(body: string): boolean {
+  const s = body.slice(0, 200).trimStart().toLowerCase();
+  return s.startsWith("<!doctype") || s.startsWith("<html");
+}
+
+/** 502 時の nginx 本文などをそのまま画面に出さない */
+function formatHttpError(res: Response, body: string): string {
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("application/json")) {
+    const parsed = parseFastApiDetail(body);
+    if (parsed) return parsed;
+  } else {
+    const parsed = parseFastApiDetail(body);
+    if (parsed) return parsed;
+  }
+
+  if (looksLikeHtml(body)) {
+    if (res.status === 502) {
+      return "API サーバに接続できませんでした（502 Bad Gateway）。Docker では api コンテナが起動しているか、ログを確認してください。";
+    }
+    if (res.status === 503) {
+      return "サービスが一時的に利用できません（503）。";
+    }
+    if (res.status === 504) {
+      return "ゲートウェイがタイムアウトしました（504）。アップロードが大きい場合は時間をおいて再試行してください。";
+    }
+    return `サーバから HTML エラーが返りました（HTTP ${res.status}）。管理者に連絡してください。`;
+  }
+
+  const t = body.trim();
+  if (t.length > 400) return `${t.slice(0, 400)}…`;
+  return t || res.statusText || `HTTP ${res.status}`;
+}
+
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    throw new Error(formatHttpError(res, text));
   }
   return res.json() as Promise<T>;
 }
@@ -125,29 +181,29 @@ export async function patchMeLlm(body: { openai_api_key?: string; openai_model?:
   return handle(res);
 }
 
-export async function loginRequest(username: string, password: string): Promise<{ access_token: string }> {
+export async function loginRequest(email: string, password: string): Promise<{ access_token: string }> {
   const res = await fetch(`${PREFIX}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   return handle(res);
 }
 
-export async function registerRequest(username: string, password: string): Promise<{ access_token: string }> {
+export async function registerRequest(email: string, password: string): Promise<{ access_token: string }> {
   const res = await fetch(`${PREFIX}/api/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   return handle(res);
 }
 
-export async function bootstrapRequest(username: string, password: string): Promise<{ access_token: string }> {
+export async function bootstrapRequest(email: string, password: string): Promise<{ access_token: string }> {
   const res = await fetch(`${PREFIX}/api/auth/bootstrap`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   return handle(res);
 }
@@ -163,7 +219,7 @@ export async function adminListUsers(): Promise<AdminUserRow[]> {
 }
 
 export async function adminCreateUser(body: {
-  username: string;
+  email: string;
   password: string;
   is_admin: boolean;
 }): Promise<AdminUserRow> {
@@ -175,8 +231,8 @@ export async function adminCreateUser(body: {
   return handle(res);
 }
 
-export async function adminResetPassword(username: string, newPassword: string): Promise<{ ok: boolean }> {
-  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(username)}/password`, {
+export async function adminResetPassword(loginEmail: string, newPassword: string): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(loginEmail)}/password`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ new_password: newPassword }),
@@ -184,8 +240,8 @@ export async function adminResetPassword(username: string, newPassword: string):
   return handle(res);
 }
 
-export async function adminSetRole(username: string, isAdmin: boolean): Promise<{ ok: boolean }> {
-  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(username)}/role`, {
+export async function adminSetRole(loginEmail: string, isAdmin: boolean): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(loginEmail)}/role`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ is_admin: isAdmin }),
@@ -193,8 +249,8 @@ export async function adminSetRole(username: string, isAdmin: boolean): Promise<
   return handle(res);
 }
 
-export async function adminDeleteUser(username: string): Promise<{ ok: boolean }> {
-  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+export async function adminDeleteUser(loginEmail: string): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${PREFIX}/api/admin/users/${encodeURIComponent(loginEmail)}`, { method: "DELETE" });
   return handle(res);
 }
 

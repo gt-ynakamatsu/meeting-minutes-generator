@@ -140,7 +140,7 @@ def render_error_hints(status: str):
     with st.expander("トラブルシューティング（よくある原因）", expanded=False):
         st.markdown(
             """
-- **GPU / CUDA**: 動画・音声モードでは Whisper が GPU を使います。`nvidia-smi` で空きを確認し、ワーカーログを参照してください。
+- **GPU / CUDA**: 動画・音声モードでは Whisper が GPU を使います。`CUDA ... out of memory` のときはワーカーに `WHISPER_MODEL=small` や `WHISPER_COMPUTE_TYPE=int8_float16`（`.env`）を試してください。`nvidia-smi` で空きを確認し、ワーカーログを参照してください。
 - **Ollama**: モデルが未 pull のときは `docker exec ollama-server ollama pull <モデル名>` を実行してください。接続先は `OLLAMA_BASE_URL` です。
 - **OpenAI**: API キー・モデル名・利用上限（429）を確認してください。
 - **テキスト / SRT**: 文字コードは UTF-8 推奨。SRT はタイムコード行の形式が崩れていると読み取れないことがあります。
@@ -363,11 +363,13 @@ with st.sidebar:
                 context_json=context_json,
             )
 
+            ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(notification_type, "browser")
             llm_config = {
                 "provider": "openai" if llm_provider == "OpenAI API" else "ollama",
                 "api_key": openai_api_key,
                 "ollama_model": ollama_model,
                 "openai_model": openai_model,
+                "notification_type": ntype,
             }
             prompt_paths = save_uploaded_prompts(task_id, fmt_extract, fmt_merge)
             process_video_task.delay(
@@ -378,6 +380,7 @@ with st.sidebar:
                 webhook_url,
                 llm_config,
                 prompt_paths,
+                "",
             )
 
             if notification_type == "ブラウザ":

@@ -12,7 +12,7 @@
 *   **完全ローカル処理**: データはすべて社内のサーバー内で処理・保存されるため、機密情報が外部に漏れる心配はありません。
 *   **モデル切り替え**: 要約・統合は Ollama（モデル名指定可）または OpenAI API から選択できます。
 *   **フォーマット差し替え**: 社内テンプレに合わせて `prompt_extract` / `prompt_merge` 相当の `.txt` をアップロードして利用できます（プレースホルダはアプリ内ヘルプ参照）。
-*   **バージョン表示**: アプリの版は `version.py` および画面フッターで確認できます。変更履歴は `CHANGELOG.md` を参照してください。
+*   **バージョン表示**: アプリの版は `version.py`（`__version__`）および画面フッターで確認できます。変更履歴は `CHANGELOG.md` を参照してください。リリースや運用・UI に目に見える変更が入ったときは、版を上げて `CHANGELOG.md` に要約を追記します（内部のみの軽微な修正では省略しても構いません）。
 *   **会議メタ＆コンテキスト**: 議題・分類・タグに加え、目的・参加者・用語・トーンなどを入力すると抽出・統合プロンプトに反映されます。
 *   **プリセット**: `presets_builtin.json` の会議タイプ（定例・顧客・1on1 等）を選べます。追記・編集で社内用に拡張可能です。
 *   **テキスト / SRT 入力**: 文字起こし済みの `.txt` や `.srt` だけでも議事録生成できます（Whisper をスキップ）。
@@ -47,6 +47,7 @@ cd meeting-minutes-generator
 | **ポート（環境依存）** | 既定ではブラウザ **`http://localhost:8085`** で UI にアクセスします。8085 が既に使われている場合は、起動**前**にプロジェクト直下で `.env` を用意し **`MM_FRONTEND_PORT`** を変更してください（`.env.example` 参照）。 |
 | **CORS（本番・社内 URL）** | ブラウザから **別ホスト名・HTTPS** で API にアクセスする場合は、起動**前**に **`MM_CORS_ORIGINS`**（カンマ区切り）にそのオリジンを含めてください。ローカルだけなら既定のままで可。 |
 | **Webhook（任意）** | 完了通知を使う場合は **`.env` の `WEBHOOK_URL`** に実 URL を書く（`docker-compose.yml` は `${WEBHOOK_URL}` を参照）。未使用ならプレースホルダのままで可。 |
+| **メール通知（任意）** | UI で「メール」を選べるのは **`MM_SMTP_HOST` と `MM_SMTP_FROM`** 等が設定されているとき。完了メールの送信は **Celery ワーカー**が行うため、**api と worker の両方**に同じ SMTP 環境変数を渡す（`.env.example` 参照）。ログイン時は通知先の既定が **ログイン ID（メール）**。 |
 | **.env（任意）** | プロジェクト直下の `.env` を Compose が自動読み込み。**GT-2222 では既定として `config/gt-2222.env` をコピー**するのがおすすめ（`cp config/gt-2222.env .env`）。汎用テンプレは `.env.example`。 |
 | **ログイン認証** | **`MM_AUTH_SECRET`** があると JWT ログインが有効になり、**ユーザーごとに `data/user_data/.../minutes.db` に議事録が分離**されます。`docker compose` では未指定時も **既定のフォールバック秘密鍵で認証 ON**（本番は `openssl rand -hex 32` 等で必ず差し替え）。初回はブラウザの初回セットアップまたは `MM_BOOTSTRAP_ADMIN_*` で管理者を作成。 |
 
@@ -64,6 +65,21 @@ docker compose up -d --build
 * 初回はイメージビルドと Whisper 用モデルのダウンロードに時間がかかることがあります。
 
 **GT-2222** … ホスト向けの既定値は **`config/gt-2222.env`**。`cp config/gt-2222.env .env` のうえ、上記と同じく `docker compose up -d --build` で可。8085 が旧 Streamlit（`whisper-ui`）と重なる場合は、先に一方を止めるか `.env` の **`MM_FRONTEND_PORT`** を変更してください。
+
+#### tar.gz でサーバへ送って手動 `docker compose`（`deploy.sh` を使わない場合）
+
+`scripts/deploy.sh` や rsync を使わず、**tar で固めて転送 → 解凍 → 自分で `down` / `up --build`** する運用で問題ありません。
+
+1. **送る側**: `scripts/tar-scp.sh`（または同等の `tar czf`）。このスクリプトは **docker compose を実行しません**。
+2. **サーバ側**: 解凍後、**必ずプロジェクト直下**で次を実行してください。
+   ```bash
+   docker compose down
+   docker compose up -d --build
+   ```
+   ソースだけ更新して **`--build` を付けない**と、コンテナ内のコード／イメージが古いままになり、**502** や **ジョブがキュー待ちのまま**（ワーカーが起動できていない）などにつながります。
+
+- **新規ファイル**（例: `backend/smtp_notify.py`）がアーカイブに含まれているか確認してください。**メール通知を UI で選ばなくても API は起動時に `backend` 配下のモジュールを読み込みます**。欠けると API やワーカーが落ちます。
+- `tar xzf` の上書き展開では、**送る側で消したパスがサーバから消えない**ことがあります（`tar-scp.sh` 先頭コメント）。挙動がおかしいときはサーバ上のツリーと差分を確認してください。
 
 ### 4. 要約用 AI モデルの準備（必須・起動後）
 **別途起動している Ollama** で、要約に使うモデルを取得してください（コンテナ名は環境により異なります）。
@@ -103,7 +119,9 @@ docker exec ollama-server ollama pull qwen2.5:7b
 | `CELERY_BROKER_URL` | Redis（Compose 内は `redis://redis:6379/0`） |
 | `OLLAMA_BASE_URL` | LLM（Compose 内ワーカー既定は **`http://ollama-server:11434`**・`llm-net` 上のコンテナ名想定。CLI をホストで動かすなら `http://127.0.0.1:11434` 等） |
 | `OLLAMA_MODEL` | CLI パイプライン `02_extract` / `03_merge` のモデル名（既定 `qwen2.5:7b`） |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE` | **worker のみ**。動画・音声の文字起こし（faster-whisper）。既定 `medium` / `cuda` / `float16`。VRAM 不足時は `small` や `int8_float16`、必要なら `cpu` + `int8`（遅い） |
 | `WEBHOOK_URL` | 完了通知 Webhook |
+| `MM_SMTP_HOST` / `MM_SMTP_FROM` | メール完了通知（必須ペア。他は `.env.example`） |
 | `MM_AUTH_SECRET` | JWT 署名用秘密鍵。**未指定時は Compose 内蔵フォールバックで認証 ON**。本番は独自の長いランダム文字列を推奨 |
 | `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` | 任意。API 起動時にユーザー 0 件なら最初の管理者を自動登録 |
 | `MM_AUTH_TOKEN_HOURS` | JWT 有効時間（既定 168） |
@@ -141,9 +159,12 @@ python3 03_merge.py
 *   `app.py`: Streamlit フロントエンド（Markdown表示・DL機能付き）
 *   `tasks.py`: AI議事録生成パイプライン（Celeryワーカー）
 *   `pipeline/`: ローカル実行用スクリプト群
-*   `prompt_extract.txt`: 抽出フェーズ用プロンプト
-*   `prompt_merge.txt`: 統合フェーズ用プロンプト
-*   `archive/`: 古いバージョンのコード
+*   `prompts/prompt_extract.txt`: 抽出フェーズ用プロンプト
+*   `prompts/prompt_merge.txt`: 統合フェーズ用プロンプト
+*   `scripts/`: デプロイ・クリーンアップ等の補助スクリプト
 
 ## 環境の削除
-`cleanup.bat` (Windows) または `cleanup.sh` (Linux) を実行すると、データベースやログを含むすべてのデータを削除して初期化できます。
+`scripts/cleanup.bat` (Windows) または `scripts/cleanup.sh` (Linux) を実行すると、データベースやログを含むすべてのデータを削除して初期化できます（リポジトリルートで `docker-compose` が動くよう、スクリプトは自動で親ディレクトリに移動します）。
+
+## 配布用 ZIP（任意）
+リポジトリルートで `python scripts/package_zip.py` を実行すると、除外ルール付きで `meeting-minutes-generator.zip` を生成します。

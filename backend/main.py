@@ -14,6 +14,7 @@ import bcrypt
 from pydantic import ValidationError
 
 import database as db
+from backend import smtp_notify
 from celery_app import celery_app
 from backend.auth_jwt import create_access_token
 from backend.auth_settings import auth_enabled, self_register_enabled
@@ -61,6 +62,12 @@ def _content_disposition_attachment(filename: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    n = db.purge_all_minutes_archives()
+    if n:
+        logging.getLogger("uvicorn.error").info(
+            "議事録の保持期限により %s 件のレコードを削除しました（MM_MINUTES_RETENTION_DAYS）。",
+            n,
+        )
     if not auth_enabled():
         logging.getLogger("uvicorn.error").warning(
             "MM_AUTH_SECRET が未設定のため認証が無効です。全利用者が同一の議事録 DB（data/minutes.db）を共有します。"
@@ -101,13 +108,20 @@ def api_version():
 
 @app.get("/api/auth/status", response_model=AuthStatusResponse)
 def auth_status():
+    email_ok = smtp_notify.smtp_configured()
     if not auth_enabled():
-        return AuthStatusResponse(auth_required=False, bootstrap_needed=False, self_register_allowed=False)
+        return AuthStatusResponse(
+            auth_required=False,
+            bootstrap_needed=False,
+            self_register_allowed=False,
+            email_notify_available=email_ok,
+        )
     n = db.count_users()
     return AuthStatusResponse(
         auth_required=True,
         bootstrap_needed=n == 0,
         self_register_allowed=self_register_enabled() and n > 0,
+        email_notify_available=email_ok,
     )
 
 
@@ -120,12 +134,16 @@ def auth_login(body: LoginRequest):
             status_code=503,
             detail="ユーザーが未登録です。ブラウザで初回セットアップを行うか、MM_BOOTSTRAP_ADMIN_USER / MM_BOOTSTRAP_ADMIN_PASSWORD を設定して API を再起動してください。",
         )
-    username = (body.username or "").strip()
+    email = db.registry_login_normalize(body.email or "")
+    try:
+        db.validate_registry_login_email(email)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     # コピペや古いクライアント由来の CR を除去（パスワード先頭末尾の通常空白はそのまま）
     password = (body.password or "").replace("\r", "")
-    row = db.get_user_by_username(username)
+    row = db.get_user_by_username(email)
     if not row or not _verify_password(password, row["password_hash"]):
-        raise HTTPException(status_code=401, detail="ユーザー名またはパスワードが正しくありません")
+        raise HTTPException(status_code=401, detail="メールアドレスまたはパスワードが正しくありません")
     token = create_access_token(row["username"])
     return TokenResponse(access_token=token)
 
@@ -136,17 +154,17 @@ def auth_bootstrap(body: BootstrapRequest):
         raise HTTPException(status_code=400, detail="認証は無効です（MM_AUTH_SECRET が未設定）")
     if db.count_users() > 0:
         raise HTTPException(status_code=403, detail="初期設定は既に完了しています")
-    username = (body.username or "").strip()
+    email = db.registry_login_normalize(body.email or "")
     password = (body.password or "").replace("\r", "")
     try:
-        db.bootstrap_registry_admin(username, password)
+        db.bootstrap_registry_admin(email, password)
     except ValueError as e:
         msg = str(e)
         code = 403 if "既に完了" in msg else 400
         raise HTTPException(status_code=code, detail=msg) from e
     except sqlite3.IntegrityError as e:
-        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
-    row = db.get_user_by_username(username)
+        raise HTTPException(status_code=409, detail="このメールアドレスは既に使われています") from e
+    row = db.get_user_by_username(email)
     if not row:
         raise HTTPException(status_code=500, detail="登録に失敗しました")
     return TokenResponse(access_token=create_access_token(row["username"]))
@@ -164,15 +182,15 @@ def auth_register(body: LoginRequest):
             status_code=400,
             detail="最初の管理者は「初回セットアップ」から作成してください。",
         )
-    username = (body.username or "").strip()
+    email = db.registry_login_normalize(body.email or "")
     password = (body.password or "").replace("\r", "")
     try:
-        db.create_registry_user(username, password, is_admin=False)
+        db.create_registry_user(email, password, is_admin=False)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except sqlite3.IntegrityError as e:
-        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
-    row = db.get_user_by_username(username)
+        raise HTTPException(status_code=409, detail="このメールアドレスは既に使われています") from e
+    row = db.get_user_by_username(email)
     if not row:
         raise HTTPException(status_code=500, detail="登録に失敗しました")
     return TokenResponse(access_token=create_access_token(row["username"]))
@@ -181,11 +199,13 @@ def auth_register(body: LoginRequest):
 @app.get("/api/auth/me", response_model=AuthMeResponse)
 def auth_me(_auth: ApiUser):
     if not auth_enabled():
-        return AuthMeResponse(username="", is_admin=False)
+        return AuthMeResponse(email="", is_admin=False)
     u = (_auth or "").strip()
     if not u:
         raise HTTPException(status_code=401, detail="認証が必要です")
-    return AuthMeResponse(username=u, is_admin=db.user_is_admin(u))
+    row = db.get_user_by_username(u)
+    email_out = str(row["username"]) if row else u
+    return AuthMeResponse(email=email_out, is_admin=db.user_is_admin(u))
 
 
 @app.get("/api/admin/users", response_model=list[AdminUserRow])
@@ -193,7 +213,7 @@ def admin_list_users(_admin: AdminUser):
     rows = db.list_registry_users()
     return [
         AdminUserRow(
-            username=r["username"],
+            email=r["username"],
             is_admin=bool(r["is_admin"]),
             created_at=str(r["created_at"]) if r.get("created_at") is not None else None,
         )
@@ -203,28 +223,31 @@ def admin_list_users(_admin: AdminUser):
 
 @app.post("/api/admin/users", response_model=AdminUserRow)
 def admin_create_user(body: AdminCreateUserRequest, _admin: AdminUser):
-    u = (body.username or "").strip()
+    u = db.registry_login_normalize(body.email or "")
     pw = (body.password or "").replace("\r", "")
     try:
         db.create_registry_user(u, pw, is_admin=body.is_admin)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except sqlite3.IntegrityError as e:
-        raise HTTPException(status_code=409, detail="ユーザー名が既に使われています") from e
+        raise HTTPException(status_code=409, detail="このメールアドレスは既に使われています") from e
     row = db.get_user_by_username(u)
     if not row:
         raise HTTPException(status_code=500, detail="作成に失敗しました")
     return AdminUserRow(
-        username=u,
-        is_admin=db.user_is_admin(u),
+        email=str(row["username"]),
+        is_admin=db.user_is_admin(str(row["username"])),
         created_at=str(row["created_at"]) if row["created_at"] is not None else None,
     )
 
 
-@app.patch("/api/admin/users/{username}/password")
-def admin_reset_password(username: str, body: AdminPasswordResetRequest, _admin: AdminUser):
+@app.patch("/api/admin/users/{login_email}/password")
+def admin_reset_password(login_email: str, body: AdminPasswordResetRequest, _admin: AdminUser):
+    u = db.resolve_registry_username_for_mutation(login_email)
+    if not u:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません")
     try:
-        ok = db.set_registry_user_password(username, (body.new_password or "").replace("\r", ""))
+        ok = db.set_registry_user_password(u, (body.new_password or "").replace("\r", ""))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not ok:
@@ -232,10 +255,13 @@ def admin_reset_password(username: str, body: AdminPasswordResetRequest, _admin:
     return {"ok": True}
 
 
-@app.patch("/api/admin/users/{username}/role")
-def admin_set_role(username: str, body: AdminRolePatch, _admin: AdminUser):
+@app.patch("/api/admin/users/{login_email}/role")
+def admin_set_role(login_email: str, body: AdminRolePatch, _admin: AdminUser):
+    u = db.resolve_registry_username_for_mutation(login_email)
+    if not u:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません")
     try:
-        db.set_registry_user_admin(username, body.is_admin)
+        db.set_registry_user_admin(u, body.is_admin)
     except KeyError:
         raise HTTPException(status_code=404, detail="ユーザーが見つかりません") from None
     except ValueError as e:
@@ -243,12 +269,16 @@ def admin_set_role(username: str, body: AdminRolePatch, _admin: AdminUser):
     return {"ok": True}
 
 
-@app.delete("/api/admin/users/{username}")
-def admin_delete_user(username: str, _admin: AdminUser):
-    if username.strip() == _admin.strip():
+@app.delete("/api/admin/users/{login_email}")
+def admin_delete_user(login_email: str, _admin: AdminUser):
+    target = db.resolve_registry_username_for_mutation(login_email)
+    if not target:
+        raise HTTPException(status_code=404, detail="ユーザーが見つかりません")
+    admin_key = db.resolve_registry_username_for_mutation(_admin)
+    if admin_key and admin_key == target:
         raise HTTPException(status_code=400, detail="自分自身は削除できません")
     try:
-        db.delete_registry_user(username)
+        db.delete_registry_user(target)
     except KeyError:
         raise HTTPException(status_code=404, detail="ユーザーが見つかりません") from None
     except ValueError as e:
@@ -312,6 +342,28 @@ async def create_task(
         raise HTTPException(status_code=400, detail="Webhook 通知のときはメールアドレスが必須です")
 
     owner = (_auth or "").strip()
+    record_email = (meta.email or "").strip()
+    email_for_worker: Optional[str] = None
+
+    if meta.notification_type == "email":
+        if auth_enabled() and owner:
+            dest = (meta.email or "").strip() or owner
+        else:
+            dest = (meta.email or "").strip()
+        if not dest:
+            raise HTTPException(
+                status_code=400,
+                detail="メール通知の宛先をフォームに入力するか、ログインしてください（ログイン時はログイン ID のメールに送ります）。",
+            )
+        if not smtp_notify.smtp_configured():
+            raise HTTPException(
+                status_code=503,
+                detail="メール通知を使うにはサーバに SMTP を設定してください（MM_SMTP_HOST, MM_SMTP_FROM 等）。ワーカーにも同じ環境変数を渡してください。",
+            )
+        record_email = dest
+        email_for_worker = dest
+    elif meta.notification_type == "webhook":
+        email_for_worker = (meta.email or "").strip()
     if meta.llm_provider == "openai":
         if auth_enabled() and owner:
             okey, omodel = db.get_user_openai_settings(_auth)
@@ -344,7 +396,7 @@ async def create_task(
 
     db.save_initial_task(
         task_id,
-        meta.email or "",
+        record_email,
         safe_name,
         owner=owner,
         topic=meta.topic.strip(),
@@ -361,6 +413,7 @@ async def create_task(
             "api_key": openai_key,
             "ollama_model": meta.ollama_model,
             "openai_model": openai_model,
+            "notification_type": meta.notification_type,
         }
     else:
         llm_config = {
@@ -368,13 +421,12 @@ async def create_task(
             "api_key": None,
             "ollama_model": meta.ollama_model,
             "openai_model": meta.openai_model,
+            "notification_type": meta.notification_type,
         }
 
     pe_bytes = await prompt_extract.read() if prompt_extract and prompt_extract.filename else None
     pm_bytes = await prompt_merge.read() if prompt_merge and prompt_merge.filename else None
     prompt_paths = save_uploaded_prompts(task_id, pe_bytes, pm_bytes)
-
-    email_for_worker = meta.email if meta.notification_type == "webhook" else None
 
     celery_app.send_task(
         "tasks.process_video_task",
@@ -447,6 +499,7 @@ def discard_record(task_id: str, _auth: ApiUser):
 
 @app.get("/api/records/{task_id}/export/minutes")
 def export_minutes(task_id: str, _auth: ApiUser):
+    db.purge_expired_minutes_db_path(db.minutes_db_path(_auth or ""))
     row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")
@@ -481,6 +534,7 @@ def export_transcript(task_id: str, _auth: ApiUser):
 
 @app.patch("/api/records/{task_id}/summary")
 def patch_summary(task_id: str, body: SummaryPatch, _auth: ApiUser):
+    db.purge_expired_minutes_db_path(db.minutes_db_path(_auth or ""))
     row = db.get_record(task_id, _auth or "")
     if not row:
         raise HTTPException(status_code=404, detail="not found")

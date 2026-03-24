@@ -101,15 +101,15 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | GET | `/api/records/{task_id}/export/minutes` | 議事録を `text/markdown` でダウンロード（長大本文用・data URL 回避） |
 | GET | `/api/records/{task_id}/export/transcript` | 書き起こし全文を `text/plain` でダウンロード |
 | GET | `/api/auth/status` | `{ auth_required, bootstrap_needed, self_register_allowed }`（`MM_AUTH_SECRET` 未設定時は `auth_required: false`。`self_register_allowed` は 1 人目作成後かつ `MM_AUTH_SELF_REGISTER` 許可時に真） |
-| POST | `/api/auth/bootstrap` | 初回のみ（registry のユーザー数が 0）。`{ username, password }` で最初の **管理者** を作成し JWT を返す |
+| POST | `/api/auth/bootstrap` | 初回のみ（registry のユーザー数が 0）。`{ email, password }` で最初の **管理者** を作成し JWT を返す |
 | POST | `/api/auth/register` | ユーザーが 1 人以上いるとき、自己登録で **一般ユーザー** を追加し JWT を返す（`MM_AUTH_SELF_REGISTER=0` で無効） |
-| POST | `/api/auth/login` | `{ username, password }` → JWT |
-| GET | `/api/auth/me` | Bearer 必須（認証オフ時は `username: ""`）。`{ username, is_admin }` |
+| POST | `/api/auth/login` | `{ email, password }` → JWT |
+| GET | `/api/auth/me` | Bearer 必須（認証オフ時は `email: ""`）。`{ email, is_admin }` |
 | GET | `/api/admin/users` | **管理者のみ**。ユーザー一覧（パスワードは含まない） |
-| POST | `/api/admin/users` | **管理者のみ**。`{ username, password, is_admin }` でユーザ追加 |
-| PATCH | `/api/admin/users/{username}/password` | **管理者のみ**。`{ new_password }` |
-| PATCH | `/api/admin/users/{username}/role` | **管理者のみ**。`{ is_admin }`（最後の管理者の降格は不可） |
-| DELETE | `/api/admin/users/{username}` | **管理者のみ**。自分自身・最後の管理者は不可 |
+| POST | `/api/admin/users` | **管理者のみ**。`{ email, password, is_admin }` でユーザ追加 |
+| PATCH | `/api/admin/users/{login_email}/password` | **管理者のみ**。`{ new_password }`（`login_email` は URL エンコード） |
+| PATCH | `/api/admin/users/{login_email}/role` | **管理者のみ**。`{ is_admin }`（最後の管理者の降格は不可） |
+| DELETE | `/api/admin/users/{login_email}` | **管理者のみ**。自分自身・最後の管理者は不可 |
 
 ### 5.1 `POST /api/tasks` の `metadata`（JSON）
 
@@ -131,7 +131,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
 - **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・OpenAI（サーバ保存キー）等。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
-- **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。
+- **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。**秘密をここに入れないこと**（後述 §7.2）。
 
 ---
 
@@ -141,6 +141,45 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **認証**: `MM_AUTH_SECRET`（十分に長いランダム文字列）を設定すると JWT 認証が有効。初回は **ユーザー 0 件のときだけ** `POST /api/auth/bootstrap` または `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` で最初の管理者を作成可能。外向き公開する場合は HTTPS・IP 制限・WAF 等と併用すること。
 - **CORS**: `CORS_ORIGINS` 環境変数（カンマ区切り）。開発時は `http://localhost:5173` を含める。LAN の IP でフロントにアクセスする場合は当該オリジンも列挙する。
 - **アップロード上限**: Nginx `client_max_body_size 2000m`（従来 Streamlit 設定に合わせた目安）。
+
+### 7.1 設定・秘密情報の「どこに書くか」（コード所在）
+
+| 種別 | 主な読み取り元 | 備考 |
+|------|----------------|------|
+| JWT 署名鍵・トークン TTL・自己登録可否 | `backend/auth_settings.py`（`MM_AUTH_SECRET`, `MM_AUTH_TOKEN_HOURS`, `MM_AUTH_SELF_REGISTER`） | **秘密鍵はこのモジュール経由でサーバ内のみ**。クライアント JS に含めない。 |
+| registry を使うか（認証の前提） | `database.py` の `_auth_secret_configured()`（`MM_AUTH_SECRET` の有無） | 上記と同じ環境変数を参照。 |
+| CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | 秘密ではないが、**許可先を広げすぎない**こと。 |
+| 議事録保持日数などその他 | `database.py` 等（例: `MM_MINUTES_RETENTION_DAYS`） | サーバ環境変数。 |
+| ホスト公開ポート・ブローカ URL | `docker-compose.yml`、`.env` / `.env.example` | **ポート番号自体は「秘密」ではない**が、不要なポートを外向きに開かない運用とセット。 |
+| フロントの API ベース URL | ビルド時 `VITE_API_BASE` → `frontend/src/api.ts` の `PREFIX` | **公開してよい URL のみ**（後述）。 |
+
+### 7.2 外部に出してはいけないもの（うっかり混入防止）
+
+以下を **リポジトリのコミット・静的フロントのビルド成果物・公開スクリーンショット・サポート添付・ログ出力** に含めないこと。
+
+| 対象 | 理由 | 典型の誤り |
+|------|------|------------|
+| `MM_AUTH_SECRET` | JWT 偽造・セッション乗っ取りに直結 | `.env` を git add する、`docker-compose.yml` のまま本番運用する、環境変数一覧をそのまま貼る |
+| `MM_BOOTSTRAP_ADMIN_PASSWORD` | 初期管理者の乗っ取り | 同上 |
+| ユーザーパスワード（平文） | そもそもサーバにも平文保存しない（bcrypt のみ） | ログにリクエストボディを出す |
+| 利用者の OpenAI API キー（registry 保存分） | 第三者による課金・モデル悪用 | DB ファイルを無暗に配布、バックアップを公開領域に置く |
+| Celery `WEBHOOK_URL` に含まれるシークレット付き URL | Webhook への不正 POST | 設定値をログに全文出力 |
+
+**JWT（`localStorage` の `mm_auth_token`）**は署名鍵ではなく**トークン本体**である。秘密鍵と混同しないこと。XSS や共有端末では漏えいリスクがあるため、本番は HTTPS・CSP 等の一般的対策と併用する。
+
+### 7.3 フロントエンド（Vite）で「出てよい情報」だけ
+
+- `VITE_*` は **ビルド時にクライアント用 JS に埋め込まれる**と考える。API の**公開ベース URL**（例: 同一オリジンなら空）程度に留める。
+- **`VITE_*` に `MM_AUTH_SECRET`・API キー・パスワードを渡さない。** 認証はログイン後の Bearer のみ。
+- 開発時の `VITE_DEV_API_PROXY`（`vite.config.ts`）は開発サーバ用であり、本番 Nginx 配信の `dist` には乗らないが、**チーム共有の `.env` に本番秘密を書かない**運用にすること。
+
+### 7.4 運用チェックリスト（リリース・公開前）
+
+1. **本番**では `MM_AUTH_SECRET` を `openssl rand -hex 32` 等で**一意の長い値**にし、リポジトリ既定のフォールバック（Compose 未指定時の文字列）を使わない。
+2. `.env` を **`.gitignore` 対象のまま**にし、秘密をコミットしない。
+3. `MM_CORS_ORIGINS` は**実際に使うフロントのオリジンのみ**（ワイルドカードや過剰な `*` を避ける）。
+4. API コンテナの **8000 をインターネットに直晒さない**（フロント Nginx 経由、またはリバースプロキシ後段のみ）。
+5. スクリーンショット・インシデント報告に **Compose 画面・環境変数一覧・registry.db** が写り込まないよう注意する。
 
 ---
 
@@ -171,6 +210,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 ## 11. 環境依存値の扱い（ハードコード方針）
 
+- **秘密情報の所在と流出防止**は **§7.1〜7.4** を正とする（本節はホスト名・URL のハードコード方針に限定する）。
 - **コンテナ内のホスト名**（例: Compose の `redis`、`api`）は Docker のサービス名であり、**特定サーバーの固有名ではない**。Nginx の `proxy_pass http://api:8000` も同様。
 - **ホストマシンや社内 DNS に依存する値**は可能な限り **環境変数**に寄せる:
   - API: `CORS_ORIGINS`（Compose では `MM_CORS_ORIGINS` から渡す）
@@ -190,3 +230,4 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.2 | 2026-03-23 | 初回セットアップ・ログイン・管理者 API／画面、`registry.users.is_admin`（§5・§6・§7） |
 | 1.3 | 2026-03-23 | `POST /api/auth/register`・`self_register_allowed`・`MM_AUTH_SELF_REGISTER` |
 | 1.4 | 2026-03-23 | 物理構成の `frontend/Dockerfile` 表記修正。§6 にアカウントドロップダウン・設定ドロワー「一般／ユーザー・権限」タブ・管理者権限 UI を反映 |
+| 1.5 | 2026-03-23 | ログイン ID をメールに合わせ §5 認証 API を更新。**§7.1〜7.4** に設定・秘密のコード所在と外部流出防止を明記 |

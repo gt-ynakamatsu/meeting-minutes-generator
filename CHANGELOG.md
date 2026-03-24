@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.1
+
+- **Whisper / VRAM**: 文字起こしを環境変数で調整可能に（`WHISPER_MODEL`・`WHISPER_DEVICE`・`WHISPER_COMPUTE_TYPE`）。CUDA OOM 時の緩和策を README / `.env.example`・UI トラブルシューティングに追記
+
+## 2.3.0
+
+- **プロンプト配置**: 既定テンプレートを `prompts/prompt_extract.txt`・`prompts/prompt_merge.txt` に集約（`tasks.py`・worker `Dockerfile`・ローカル `pipeline/` の参照を更新）
+- **スクリプト**: `cleanup` を `scripts/cleanup.sh` / `scripts/cleanup.bat` に移動（実行時にリポジトリルートへ移動してから `docker-compose` 等を実行）。配布用 ZIP は `scripts/package_zip.py`
+- **整理**: `pipeline/` 内の重複プロンプトとレガシー `archive/tasks_v1.py` を削除
+
 ## 2.2.2
 
 - **環境変数の整理**: `.env.example` 追加、`docker-compose` の公開ポート・CORS を `MM_FRONTEND_PORT` / `MM_CORS_ORIGINS` で上書き可能に
