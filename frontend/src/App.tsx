@@ -17,6 +17,7 @@ import {
   getAuthStatus,
   getPresets,
   getMeLlm,
+  getOllamaModels,
   getQueue,
   getRecord,
   getStoredToken,
@@ -96,7 +97,7 @@ function ErrorUserGuidance({ errorText }: { errorText: string }) {
   );
 }
 
-function TroubleshootingHints() {
+function TroubleshootingHints({ showOpenAiLine = true }: { showOpenAiLine?: boolean }) {
   return (
     <details style={{ marginTop: "0.5rem" }}>
       <summary>トラブルシューティング</summary>
@@ -107,7 +108,7 @@ function TroubleshootingHints() {
           <code>.env.example</code>）。
         </li>
         <li>Ollama: モデルが pull 済みか、`OLLAMA_BASE_URL` を確認してください。</li>
-        <li>OpenAI: API キー・上限（429）を確認してください。</li>
+        {showOpenAiLine ? <li>OpenAI: API キー・上限（429）を確認してください。</li> : null}
         <li>テキスト / SRT: UTF-8 推奨。SRT のタイムコード形式を確認してください。</li>
         <li>カスタムプロンプト: `{"{"}CHUNK_TEXT{"}"}` / `{"{"}EXTRACTED_JSON{"}"}` の有無。</li>
       </ul>
@@ -495,10 +496,12 @@ function RecordCard({
   row,
   onSaved,
   onDiscard,
+  showOpenAiTroubleshooting = true,
 }: {
   row: RecordRow;
   onSaved: () => void | Promise<void>;
   onDiscard?: (id: string) => void | Promise<void>;
+  showOpenAiTroubleshooting?: boolean;
 }) {
   const [tab, setTab] = useState<"preview" | "edit" | "raw">("preview");
   const [editText, setEditText] = useState(row.summary || "");
@@ -658,7 +661,7 @@ function RecordCard({
             {workerErrorLogText}
           </div>
           <ErrorUserGuidance errorText={workerErrorLogText} />
-          <TroubleshootingHints />
+          <TroubleshootingHints showOpenAiLine={showOpenAiTroubleshooting} />
         </div>
       ) : statusStr === "cancelled" ? (
         <div className="cancelled-box">
@@ -676,7 +679,7 @@ function RecordCard({
           <strong>エラー</strong>
           <div>{statusStr}</div>
           <ErrorUserGuidance errorText={statusStr} />
-          <TroubleshootingHints />
+          <TroubleshootingHints showOpenAiLine={showOpenAiTroubleshooting} />
         </div>
       ) : (
         <div>
@@ -1109,7 +1112,14 @@ export default function App() {
   useEffect(() => {
     getAuthStatus()
       .then(setAuthStatus)
-      .catch(() => setAuthStatus({ auth_required: false, bootstrap_needed: false, self_register_allowed: false }));
+      .catch(() =>
+        setAuthStatus({
+          auth_required: false,
+          bootstrap_needed: false,
+          self_register_allowed: false,
+          openai_enabled: true,
+        }),
+      );
   }, []);
 
   useEffect(() => {
@@ -1151,10 +1161,13 @@ export default function App() {
 
   const showLogout = authStatus.auth_required;
 
+  const openaiFeatureEnabled = authStatus.openai_enabled !== false;
+
   return (
     <AppMain
       showLogout={showLogout}
       serverOpenaiMode={authStatus.auth_required}
+      openaiFeatureEnabled={openaiFeatureEnabled}
       emailNotifyAvailable={authStatus.email_notify_available === true}
       authNonce={authNonce}
       onLogout={() => {
@@ -1177,6 +1190,195 @@ function pickTaskMediaFile(list: FileList | null): File | null {
     if (TASK_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext))) return f;
   }
   return null;
+}
+
+/** Ollama /api/tags 由来の候補＋コンボボックス。未登録モデルはそのまま入力可能（datalist は見た目が select と揃わないため未使用） */
+function OllamaModelField({
+  value,
+  onChange,
+  candidates,
+  loading,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  candidates: string[];
+  loading: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const highlightRef = useRef(-1);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listboxId = "mm-ollama-model-listbox";
+
+  const filtered = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    if (!q) return candidates;
+    return candidates.filter((c) => c.toLowerCase().includes(q));
+  }, [candidates, value]);
+
+  const showList = open && filtered.length > 0;
+
+  useEffect(() => {
+    const max = filtered.length - 1;
+    if (max < 0) {
+      if (highlightRef.current !== -1) {
+        highlightRef.current = -1;
+        setActiveIdx(-1);
+      }
+      return;
+    }
+    if (highlightRef.current > max) {
+      highlightRef.current = max;
+      setActiveIdx(max);
+    }
+  }, [filtered.length, value]);
+
+  const setHighlight = (idx: number) => {
+    const max = filtered.length - 1;
+    const next = max < 0 ? -1 : Math.max(0, Math.min(idx, max));
+    highlightRef.current = next;
+    setActiveIdx(next);
+  };
+
+  useEffect(() => {
+    const onDocDown = (e: MouseEvent) => {
+      if (wrapRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+      highlightRef.current = -1;
+      setActiveIdx(-1);
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, []);
+
+  const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      if (open) {
+        e.preventDefault();
+        setOpen(false);
+        highlightRef.current = -1;
+        setActiveIdx(-1);
+      }
+      return;
+    }
+    if (!candidates.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!open) setOpen(true);
+      if (filtered.length === 0) return;
+      const cur = highlightRef.current;
+      const next = cur < 0 ? 0 : cur + 1;
+      setHighlight(next);
+      return;
+    }
+    if (e.key === "ArrowUp" && open && filtered.length > 0) {
+      e.preventDefault();
+      const cur = highlightRef.current;
+      const next = cur < 0 ? 0 : cur - 1;
+      setHighlight(next);
+      return;
+    }
+    if (e.key === "Enter" && open) {
+      const idx = highlightRef.current;
+      if (idx >= 0 && filtered[idx]) {
+        e.preventDefault();
+        onChange(filtered[idx]);
+        setOpen(false);
+        highlightRef.current = -1;
+        setActiveIdx(-1);
+      }
+    }
+  };
+
+  return (
+    <>
+      <label htmlFor="mm-ollama-model-input">Ollama モデル名</label>
+      {loading ? (
+        <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.25rem" }}>
+          Ollama からモデル一覧を取得しています…
+        </p>
+      ) : null}
+      <div className="mm-ollama-combobox" ref={wrapRef}>
+        <input
+          ref={inputRef}
+          id="mm-ollama-model-input"
+          role="combobox"
+          aria-expanded={showList}
+          aria-controls={showList ? listboxId : undefined}
+          aria-autocomplete="list"
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            setOpen(true);
+            highlightRef.current = -1;
+            setActiveIdx(-1);
+          }}
+          onFocus={() => {
+            if (candidates.length > 0) setOpen(true);
+          }}
+          onKeyDown={onInputKeyDown}
+          placeholder={candidates.length > 0 ? "一覧から選ぶかモデル名を入力" : "モデル名（例: qwen2.5:7b）"}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {candidates.length > 0 ? (
+          <button
+            type="button"
+            className="mm-ollama-combobox__toggle"
+            tabIndex={-1}
+            aria-label="モデル候補を開く"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setOpen((o) => !o);
+              highlightRef.current = -1;
+              setActiveIdx(-1);
+              inputRef.current?.focus();
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="M6 9l6 6 6-6"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        ) : null}
+        {showList ? (
+          <ul className="mm-ollama-combobox__list" id={listboxId} role="listbox">
+            {filtered.map((m, idx) => (
+              <li
+                key={m}
+                role="option"
+                aria-selected={idx === activeIdx}
+                className={`mm-ollama-combobox__option${idx === activeIdx ? " mm-ollama-combobox__option--active" : ""}`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onChange(m);
+                  setOpen(false);
+                  highlightRef.current = -1;
+                  setActiveIdx(-1);
+                }}
+                onMouseEnter={() => setHighlight(idx)}
+              >
+                {m}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      {!loading && candidates.length === 0 ? (
+        <p className="muted" style={{ fontSize: "0.78rem", margin: "0.25rem 0 0", lineHeight: 1.45 }}>
+          一覧を取得できませんでした。Ollama が起動しているか、API コンテナの <code>OLLAMA_BASE_URL</code>（Docker では <code>llm-net</code> 経由）を確認してください。手入力は可能です。
+        </p>
+      ) : null}
+    </>
+  );
 }
 
 function UploadDropIcon({ className }: { className?: string }) {
@@ -1204,12 +1406,15 @@ function UploadDropIcon({ className }: { className?: string }) {
 function AppMain({
   showLogout,
   serverOpenaiMode,
+  openaiFeatureEnabled,
   emailNotifyAvailable,
   authNonce,
   onLogout,
 }: {
   showLogout: boolean;
   serverOpenaiMode: boolean;
+  /** MM_OPENAI_ENABLED がオフのとき false（OpenAI UI・API を使わない） */
+  openaiFeatureEnabled: boolean;
   emailNotifyAvailable: boolean;
   authNonce: number;
   onLogout: () => void;
@@ -1239,6 +1444,8 @@ function AppMain({
 
   const [llmProvider, setLlmProvider] = useState<"ollama" | "openai">("ollama");
   const [ollamaModel, setOllamaModel] = useState("qwen2.5:7b");
+  const [ollamaTagList, setOllamaTagList] = useState<string[]>([]);
+  const [ollamaTagsLoading, setOllamaTagsLoading] = useState(false);
   const [openaiKey, setOpenaiKey] = useState("");
   const [openaiModel, setOpenaiModel] = useState("gpt-4o-mini");
   const [openaiConfigured, setOpenaiConfigured] = useState(false);
@@ -1335,14 +1542,21 @@ function AppMain({
   }, [serverOpenaiMode, authNonce]);
 
   useEffect(() => {
-    if (!serverOpenaiMode) return;
+    if (!openaiFeatureEnabled && llmProvider === "openai") {
+      setLlmProvider("ollama");
+    }
+  }, [openaiFeatureEnabled, llmProvider]);
+
+  useEffect(() => {
+    if (!serverOpenaiMode || !openaiFeatureEnabled) return;
     getMeLlm()
       .then((m) => {
+        if (m.openai_feature_enabled === false) return;
         setOpenaiConfigured(m.openai_configured);
         setProfileOpenaiModel(m.openai_model || "gpt-4o-mini");
       })
       .catch(() => {});
-  }, [serverOpenaiMode, authNonce]);
+  }, [serverOpenaiMode, openaiFeatureEnabled, authNonce]);
 
   useEffect(() => {
     getVersion().then((v) => setVersion(v.version)).catch(() => setVersion("?"));
@@ -1356,6 +1570,31 @@ function AppMain({
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOllamaTagsLoading(true);
+    getOllamaModels()
+      .then((names) => {
+        if (!cancelled) setOllamaTagList(names);
+      })
+      .catch(() => {
+        if (!cancelled) setOllamaTagList([]);
+      })
+      .finally(() => {
+        if (!cancelled) setOllamaTagsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authNonce]);
+
+  const ollamaCandidates = useMemo(() => {
+    const uniq = new Set<string>(ollamaTagList);
+    const cur = ollamaModel.trim();
+    if (cur) uniq.add(cur);
+    return Array.from(uniq).sort((a, b) => a.localeCompare(b));
+  }, [ollamaTagList, ollamaModel]);
 
   useEffect(() => {
     refreshRecords().catch((e) => setErr(String(e)));
@@ -1469,11 +1708,13 @@ function AppMain({
         ? email.trim().length > 0
         : email.trim().length > 0 || !!authMe?.email));
 
+  const effectiveLlmProvider = openaiFeatureEnabled ? llmProvider : "ollama";
+
   const canSubmit =
     !!file &&
     (notification !== "webhook" || email.trim().length > 0) &&
     emailRecipientOk &&
-    (llmProvider !== "openai" ||
+    (effectiveLlmProvider !== "openai" ||
       (serverOpenaiMode ? openaiConfigured : openaiKey.trim().length > 0));
 
   const closeSettings = useCallback(() => {
@@ -1507,9 +1748,10 @@ function AppMain({
       email: email.trim(),
       webhook_url: webhookUrl.trim() || null,
       notification_type: notification,
-      llm_provider: llmProvider,
+      llm_provider: effectiveLlmProvider,
       ollama_model: ollamaModel.trim(),
-      openai_api_key: serverOpenaiMode ? null : openaiKey.trim() || null,
+      openai_api_key:
+        serverOpenaiMode || effectiveLlmProvider !== "openai" ? null : openaiKey.trim() || null,
       openai_model: serverOpenaiMode ? profileOpenaiModel : openaiModel,
       topic: topic.trim(),
       meeting_date: meetingDate.trim(),
@@ -1647,45 +1889,68 @@ function AppMain({
           </details>
 
           <h3>解析設定</h3>
-          {serverOpenaiMode ? (
+          {serverOpenaiMode && openaiFeatureEnabled ? (
             <p className="muted" style={{ fontSize: "0.85rem", lineHeight: 1.55 }}>
               OpenAI を使う場合は右上の<strong>アカウントアイコン</strong>からメニューを開き、<strong>設定</strong>から
               API キーを登録してください。モデル: <code>{profileOpenaiModel}</code>
               {!openaiConfigured ? "（未登録のため OpenAI での投入はできません）" : null}
             </p>
           ) : null}
-          <label>AI の接続先</label>
-          <select
-            value={llmProvider}
-            onChange={(e) => setLlmProvider(e.target.value as "ollama" | "openai")}
-          >
-            <option value="ollama">ローカル（Ollama）</option>
-            <option value="openai">OpenAI API</option>
-          </select>
-          {llmProvider === "openai" ? (
-            serverOpenaiMode ? (
-              <p className="muted" style={{ fontSize: "0.88rem" }}>
-                上の「OpenAI アカウント」でキーを登録してください。使用モデル: <code>{profileOpenaiModel}</code>
-                {!openaiConfigured ? "（未登録のため投入できません）" : null}
-              </p>
-            ) : (
-              <>
-                <label>OpenAI API キー</label>
-                <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
-                <label>OpenAI モデル</label>
-                <select value={openaiModel} onChange={(e) => setOpenaiModel(e.target.value)}>
-                  {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </>
-            )
+          {openaiFeatureEnabled ? (
+            <>
+              <label>AI の接続先</label>
+              <select
+                value={llmProvider}
+                onChange={(e) => setLlmProvider(e.target.value as "ollama" | "openai")}
+              >
+                <option value="ollama">ローカル（Ollama）</option>
+                <option value="openai">OpenAI API</option>
+              </select>
+              {llmProvider === "openai" ? (
+                serverOpenaiMode ? (
+                  <p className="muted" style={{ fontSize: "0.88rem" }}>
+                    上の「OpenAI アカウント」でキーを登録してください。使用モデル: <code>{profileOpenaiModel}</code>
+                    {!openaiConfigured ? "（未登録のため投入できません）" : null}
+                  </p>
+                ) : (
+                  <>
+                    <label>OpenAI API キー</label>
+                    <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
+                    <label>OpenAI モデル</label>
+                    <select value={openaiModel} onChange={(e) => setOpenaiModel(e.target.value)}>
+                      {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )
+              ) : (
+                <OllamaModelField
+                  value={ollamaModel}
+                  onChange={setOllamaModel}
+                  candidates={ollamaCandidates}
+                  loading={ollamaTagsLoading}
+                />
+              )}
+            </>
           ) : (
             <>
-              <label>Ollama モデル名</label>
-              <input value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} />
+              <p className="muted" style={{ fontSize: "0.85rem", lineHeight: 1.55, margin: "0 0 0.65rem" }}>
+                OpenAI / ChatGPT は<strong>オフ</strong>です（API キー入力・登録はありません）。解析は{" "}
+                <strong>Ollama のモデル名</strong>で行います。再有効化: サーバに <code>MM_OPENAI_ENABLED=1</code> を設定して再起動。
+              </p>
+              <label>AI の接続先</label>
+              <select value="ollama" disabled aria-label="現在はローカル（Ollama）のみ利用可能です">
+                <option value="ollama">ローカル（Ollama）</option>
+              </select>
+              <OllamaModelField
+                value={ollamaModel}
+                onChange={setOllamaModel}
+                candidates={ollamaCandidates}
+                loading={ollamaTagsLoading}
+              />
             </>
           )}
 
@@ -1851,7 +2116,13 @@ function AppMain({
               <p className="muted">該当する記録がありません。</p>
             ) : (
               records.map((r) => (
-                <RecordCard key={r.id} row={r} onSaved={refreshRecords} onDiscard={handleDiscardTask} />
+                <RecordCard
+                  key={r.id}
+                  row={r}
+                  onSaved={refreshRecords}
+                  onDiscard={handleDiscardTask}
+                  showOpenAiTroubleshooting={openaiFeatureEnabled}
+                />
               ))
             )}
           </div>
@@ -1912,12 +2183,14 @@ function AppMain({
               <section className="settings-section">
                 <h3>アカウント</h3>
                 <p className="muted" style={{ margin: 0 }}>
-                  認証は無効です。OpenAI を使う場合は左のフォームから API キーを入力してください。
+                  {openaiFeatureEnabled
+                    ? "認証は無効です。OpenAI を使う場合は左のフォームから API キーを入力してください。"
+                    : "認証は無効です。解析はローカル（Ollama）のみです。"}
                 </p>
               </section>
             )}
 
-            {serverOpenaiMode ? (
+            {serverOpenaiMode && openaiFeatureEnabled ? (
               <section className="settings-section">
                 <h3>OpenAI</h3>
             <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>

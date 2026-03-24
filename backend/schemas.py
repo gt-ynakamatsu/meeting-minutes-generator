@@ -48,6 +48,8 @@ class AuthStatusResponse(BaseModel):
     self_register_allowed: bool = True
     # MM_SMTP_HOST / MM_SMTP_FROM が揃っているとき True（メール通知が利用可能）
     email_notify_available: bool = False
+    # MM_OPENAI_ENABLED がオフのとき False（フロントで OpenAI UI を隠す）
+    openai_enabled: bool = True
 
 
 class BootstrapRequest(BaseModel):
@@ -83,11 +85,18 @@ class AdminRolePatch(BaseModel):
 class MeLLMResponse(BaseModel):
     openai_configured: bool
     openai_model: str
+    openai_feature_enabled: bool = True
 
 
 class MeLLMPatch(BaseModel):
     openai_api_key: Optional[str] = None
     openai_model: Optional[str] = None
+
+
+class OllamaModelsResponse(BaseModel):
+    """GET /api/ollama/models — Ollama /api/tags の name 一覧"""
+
+    models: list[str] = []
 
 
 class RecordsQuery(BaseModel):

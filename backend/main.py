@@ -3,6 +3,8 @@ import logging
 import os
 import sqlite3
 import uuid
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -14,6 +16,7 @@ import bcrypt
 from pydantic import ValidationError
 
 import database as db
+import feature_flags
 from backend import smtp_notify
 from celery_app import celery_app
 from backend.auth_jwt import create_access_token
@@ -30,6 +33,7 @@ from backend.schemas import (
     LoginRequest,
     MeLLMPatch,
     MeLLMResponse,
+    OllamaModelsResponse,
     SummaryPatch,
     TaskSubmitMetadata,
     TokenResponse,
@@ -48,6 +52,32 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
     if row is None:
         return {}
     return {k: row[k] for k in row.keys()}
+
+
+def _ollama_base_url() -> str:
+    return (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
+
+
+def _fetch_ollama_model_names(timeout_sec: float = 6.0) -> List[str]:
+    base = _ollama_base_url()
+    url = f"{base}/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, ValueError):
+        return []
+    except Exception:
+        return []
+    names: List[str] = []
+    for m in data.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        n = m.get("name")
+        if isinstance(n, str) and n.strip():
+            names.append(n.strip())
+    return sorted(set(names))
 
 
 def _content_disposition_attachment(filename: str) -> str:
@@ -96,6 +126,12 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/ollama/models", response_model=OllamaModelsResponse)
+def ollama_models(_auth: ApiUser):
+    """ブラウザが Ollama に直アクセスできないため、API 経由で /api/tags を返す。"""
+    return OllamaModelsResponse(models=_fetch_ollama_model_names())
+
+
 @app.get("/api/version")
 def api_version():
     try:
@@ -109,12 +145,14 @@ def api_version():
 @app.get("/api/auth/status", response_model=AuthStatusResponse)
 def auth_status():
     email_ok = smtp_notify.smtp_configured()
+    oa = feature_flags.openai_feature_enabled()
     if not auth_enabled():
         return AuthStatusResponse(
             auth_required=False,
             bootstrap_needed=False,
             self_register_allowed=False,
             email_notify_available=email_ok,
+            openai_enabled=oa,
         )
     n = db.count_users()
     return AuthStatusResponse(
@@ -122,6 +160,7 @@ def auth_status():
         bootstrap_needed=n == 0,
         self_register_allowed=self_register_enabled() and n > 0,
         email_notify_available=email_ok,
+        openai_enabled=oa,
     )
 
 
@@ -288,16 +327,30 @@ def admin_delete_user(login_email: str, _admin: AdminUser):
 
 @app.get("/api/me/llm", response_model=MeLLMResponse)
 def me_llm_get(_auth: ApiUser):
+    oa = feature_flags.openai_feature_enabled()
     if not auth_enabled():
-        return MeLLMResponse(openai_configured=False, openai_model="gpt-4o-mini")
+        return MeLLMResponse(
+            openai_configured=False,
+            openai_model="gpt-4o-mini",
+            openai_feature_enabled=oa,
+        )
     if not (_auth or "").strip():
         raise HTTPException(status_code=401, detail="認証が必要です")
     key, model = db.get_user_openai_settings(_auth)
-    return MeLLMResponse(openai_configured=bool(key), openai_model=model)
+    return MeLLMResponse(
+        openai_configured=bool(key) if oa else False,
+        openai_model=model,
+        openai_feature_enabled=oa,
+    )
 
 
 @app.patch("/api/me/llm")
 def me_llm_patch(body: MeLLMPatch, _auth: ApiUser):
+    if not feature_flags.openai_feature_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI 連携は無効です（MM_OPENAI_ENABLED）。有効にするには環境変数を設定して API を再起動してください。",
+        )
     if not auth_enabled():
         raise HTTPException(status_code=400, detail="認証が無効なためサーバに保存できません")
     if not (_auth or "").strip():
@@ -364,6 +417,11 @@ async def create_task(
         email_for_worker = dest
     elif meta.notification_type == "webhook":
         email_for_worker = (meta.email or "").strip()
+    if meta.llm_provider == "openai" and not feature_flags.openai_feature_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI は現在無効です（MM_OPENAI_ENABLED=0 等）。ローカル（Ollama）を選ぶか、管理者に連絡してください。",
+        )
     if meta.llm_provider == "openai":
         if auth_enabled() and owner:
             okey, omodel = db.get_user_openai_settings(_auth)

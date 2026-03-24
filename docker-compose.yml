@@ -22,6 +22,10 @@ services:
       - MM_AUTH_SELF_REGISTER=${MM_AUTH_SELF_REGISTER:-1}
       # 議事録の自動削除（日）。0 で無効。未指定時は 183（約半年）。
       - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-183}
+      # OpenAI / ChatGPT（課金回避で既定オフ。有効にする: MM_OPENAI_ENABLED=1）
+      - MM_OPENAI_ENABLED=${MM_OPENAI_ENABLED:-0}
+      # モデル一覧 API 用（worker と同じ Ollama ホストを指定）。api を llm-net に参加させること。
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama-server:11434}
       # メール完了通知（任意）。設定時は worker と同じ SMTP 変数を渡す。
       # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
       # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
@@ -35,6 +39,9 @@ services:
       - "8000"
     depends_on:
       - redis
+    networks:
+      - default
+      - llm-net
 
   frontend:
     build:
@@ -67,6 +74,7 @@ services:
       - WHISPER_MODEL=${WHISPER_MODEL:-medium}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
+      - MM_OPENAI_ENABLED=${MM_OPENAI_ENABLED:-0}
       # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
       # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
       # - MM_SMTP_FROM=${MM_SMTP_FROM:-}

@@ -5,6 +5,7 @@ from tasks import process_video_task
 import uuid
 import os
 
+import feature_flags
 from streamlit_autorefresh import st_autorefresh
 from version import __version__
 
@@ -252,29 +253,37 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 今回の解析設定")
-    llm_provider = st.radio(
-        "AI の接続先",
-        ["ローカル（Ollama）", "OpenAI API"],
-        index=0,
-        help="社内の Ollama か、クラウドの OpenAI を選べます。",
-    )
-
     openai_api_key = None
     openai_model = "gpt-4o-mini"
     ollama_model = "qwen2.5:7b"
 
-    if llm_provider == "OpenAI API":
-        openai_api_key = st.text_input(
-            "OpenAI API キー",
-            type="password",
-            help="ブラウザに残りません。タスク実行時のみワーカーに渡ります。",
-        )
-        openai_model = st.selectbox(
-            "OpenAI モデル",
-            ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"],
+    if feature_flags.openai_feature_enabled():
+        llm_provider = st.radio(
+            "AI の接続先",
+            ["ローカル（Ollama）", "OpenAI API"],
             index=0,
+            help="社内の Ollama か、クラウドの OpenAI を選べます。",
         )
+        if llm_provider == "OpenAI API":
+            openai_api_key = st.text_input(
+                "OpenAI API キー",
+                type="password",
+                help="ブラウザに残りません。タスク実行時のみワーカーに渡ります。",
+            )
+            openai_model = st.selectbox(
+                "OpenAI モデル",
+                ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"],
+                index=0,
+            )
+        else:
+            ollama_model = st.text_input(
+                "Ollama モデル名",
+                value="qwen2.5:7b",
+                help="例: qwen2.5:7b / llama3.2 など。コンテナ内で pull 済みの名前を指定してください。",
+            )
     else:
+        st.caption("OpenAI / ChatGPT 連携はオフです（`MM_OPENAI_ENABLED`）。Ollama のみ使用します。")
+        llm_provider = "ローカル（Ollama）"
         ollama_model = st.text_input(
             "Ollama モデル名",
             value="qwen2.5:7b",

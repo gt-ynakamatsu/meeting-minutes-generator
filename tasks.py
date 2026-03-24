@@ -16,6 +16,7 @@ import re
 from faster_whisper import WhisperModel
 import torch
 import database as db
+import feature_flags
 from moviepy.editor import AudioFileClip, VideoFileClip
 import uuid
 import shutil
@@ -307,6 +308,10 @@ def call_llm(prompt, config, temperature=0.0, json_mode=False):
     provider = cfg.get("provider", "ollama")
 
     if provider == "openai":
+        if not feature_flags.openai_feature_enabled():
+            raise Exception(
+                "OpenAI はこの環境で無効です（MM_OPENAI_ENABLED）。Ollama を選ぶか管理者に連絡してください。"
+            )
         try:
             client = OpenAI(api_key=cfg.get("api_key"))
             response_format = {"type": "json_object"} if json_mode else {"type": "text"}

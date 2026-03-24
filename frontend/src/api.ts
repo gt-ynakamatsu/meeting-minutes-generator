@@ -70,6 +70,8 @@ export interface AuthStatus {
   self_register_allowed?: boolean;
   /** MM_SMTP_* が設定されているとき true（メール通知が選べる） */
   email_notify_available?: boolean;
+  /** MM_OPENAI_ENABLED がオフのとき false（未対応 API では undefined = 従来どおり表示） */
+  openai_enabled?: boolean;
 }
 
 export interface AuthMe {
@@ -86,6 +88,8 @@ export interface AdminUserRow {
 export interface MeLLMInfo {
   openai_configured: boolean;
   openai_model: string;
+  /** false のとき OpenAI 設定 API は利用不可 */
+  openai_feature_enabled?: boolean;
 }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -165,6 +169,13 @@ async function handle<T>(res: Response): Promise<T> {
 export async function getAuthStatus(): Promise<AuthStatus> {
   const res = await fetch(`${PREFIX}/api/auth/status`);
   return handle(res);
+}
+
+/** Ollama のローカルタグ一覧（API が OLLAMA_BASE_URL の /api/tags を中継） */
+export async function getOllamaModels(): Promise<string[]> {
+  const res = await apiFetch(`${PREFIX}/api/ollama/models`);
+  const data = await handle<{ models: string[] }>(res);
+  return Array.isArray(data.models) ? data.models : [];
 }
 
 export async function getMeLlm(): Promise<MeLLMInfo> {
