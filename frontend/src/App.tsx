@@ -955,6 +955,42 @@ export default function App() {
   );
 }
 
+/** 解析キューに載せるファイル（input accept と一致） */
+const TASK_FILE_EXTENSIONS = [".mp4", ".mp3", ".m4a", ".wav", ".txt", ".srt"];
+
+function pickTaskMediaFile(list: FileList | null): File | null {
+  if (!list?.length) return null;
+  for (let i = 0; i < list.length; i++) {
+    const f = list.item(i);
+    if (!f) continue;
+    const lower = f.name.toLowerCase();
+    if (TASK_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext))) return f;
+  }
+  return null;
+}
+
+function UploadDropIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="48"
+      height="48"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+    >
+      <path
+        d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function AppMain({
   showLogout,
   serverOpenaiMode,
@@ -1007,6 +1043,47 @@ function AppMain({
   const [file, setFile] = useState<File | null>(null);
   const [promptExtract, setPromptExtract] = useState<File | null>(null);
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
+  const [fileDropActive, setFileDropActive] = useState(false);
+  const fileDragDepth = useRef(0);
+
+  const onTaskFileDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const onTaskFileDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const types = Array.from(e.dataTransfer.types ?? []);
+    if (!types.includes("Files")) return;
+    fileDragDepth.current += 1;
+    setFileDropActive(true);
+  }, []);
+
+  const onTaskFileDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fileDragDepth.current -= 1;
+    if (fileDragDepth.current <= 0) {
+      fileDragDepth.current = 0;
+      setFileDropActive(false);
+    }
+  }, []);
+
+  const onTaskFileDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fileDragDepth.current = 0;
+    setFileDropActive(false);
+    const chosen = pickTaskMediaFile(e.dataTransfer.files);
+    if (chosen) {
+      setFile(chosen);
+      setErr(null);
+    } else if (e.dataTransfer.files.length > 0) {
+      setErr("対応していない形式です。.mp4 / .mp3 / .m4a / .wav / .txt / .srt をドロップしてください。");
+    }
+  }, []);
 
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState("（すべて）");
@@ -1240,7 +1317,7 @@ function AppMain({
         </div>
         <h1>AI 議事録アーカイブ</h1>
         <p className="muted hero--tagline">
-          左で会議情報とファイルを指定して投入。右でキューとアーカイブを確認します（一覧は下段のみスクロール）。
+          左パネルで会議情報・LLM・通知などを入力。右の上段の枠をクリックするかドラッグ＆ドロップでファイルを選び「解析をキューに追加」。その下に処理キューとアーカイブ（アーカイブは約 5 件表示でそれ以上はスクロール。狭い画面は上から縦並び）。
         </p>
       </header>
 
@@ -1397,16 +1474,34 @@ function AppMain({
 
       <main className="main main--stack">
         <div className="main-pane-top">
-          <div className="main-file-picker main-file-picker--tight">
-            <label htmlFor="mm-main-file">解析するファイル</label>
-            <div className="main-file-picker__file-row">
+          <div
+            className={`main-file-picker main-file-picker--upload${fileDropActive ? " main-file-picker--drop-target" : ""}`}
+            onDragEnter={onTaskFileDragEnter}
+            onDragLeave={onTaskFileDragLeave}
+            onDragOver={onTaskFileDragOver}
+            onDrop={onTaskFileDrop}
+          >
+            <div className="main-file-picker__heading">解析するファイル</div>
+            <label htmlFor="mm-main-file" className="main-file-drop">
               <input
                 id="mm-main-file"
                 form="mm-task-form"
                 type="file"
+                className="main-file-input-sr"
                 accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               />
+              <UploadDropIcon className="main-file-drop__icon" />
+              <span className="main-file-drop__title">クリックしてファイルを選択</span>
+              <span className="main-file-drop__sub">またはこの枠内にドラッグ＆ドロップ</span>
+              <span className="main-file-drop__formats">対応形式: .mp4 / .mp3 / .m4a / .wav / .txt / .srt</span>
+              {file ? (
+                <span className="main-file-drop__selected">
+                  選択中: <strong>{file.name}</strong>
+                </span>
+              ) : null}
+            </label>
+            <div className="main-file-picker__actions">
               <button
                 className="btn-primary btn-primary--queue-submit"
                 type="submit"
@@ -1416,15 +1511,6 @@ function AppMain({
                 解析をキューに追加
               </button>
             </div>
-            {file ? (
-              <p className="muted main-file-picker__hint">
-                選択中: <strong>{file.name}</strong>
-              </p>
-            ) : (
-              <p className="muted main-file-picker__hint">
-                .mp4 / .mp3 / .m4a / .wav / .txt / .srt
-              </p>
-            )}
           </div>
 
           <section className="main-queue" aria-label="処理キュー">
