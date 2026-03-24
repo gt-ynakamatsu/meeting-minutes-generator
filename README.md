@@ -71,12 +71,19 @@ docker compose up -d --build
 `scripts/deploy.sh` や rsync を使わず、**tar で固めて転送 → 解凍 → 自分で `down` / `up --build`** する運用で問題ありません。
 
 1. **送る側**: `scripts/tar-scp.sh`（または同等の `tar czf`）。このスクリプトは **docker compose を実行しません**。
-2. **サーバ側**: 解凍後、**必ずプロジェクト直下**で次を実行してください。
-   ```bash
-   docker compose down
-   docker compose up -d --build
-   ```
+2. **サーバ側**: 解凍後、**必ずプロジェクト直下**で次のいずれかを実行してください。
+   - **掃除付き（推奨）**: `docker compose down --rmi local` で **このプロジェクトでビルドしたイメージだけ**外してから再ビルドします。ホスト全体の `docker image prune` / `builder prune` は既定では行いません（**`./data`・`./downloads` は削除しません**）。
+     ```bash
+     bash scripts/server-rebuild.sh
+     ```
+   - **手動**:
+     ```bash
+     docker compose down
+     docker compose up -d --build
+     ```
    ソースだけ更新して **`--build` を付けない**と、コンテナ内のコード／イメージが古いままになり、**502** や **ジョブがキュー待ちのまま**（ワーカーが起動できていない）などにつながります。
+
+`scripts/deploy.sh` は同期後、リモートで **`scripts/server-rebuild.sh`** と同じ手順を実行します。
 
 - **新規ファイル**（例: `backend/smtp_notify.py`）がアーカイブに含まれているか確認してください。**メール通知を UI で選ばなくても API は起動時に `backend` 配下のモジュールを読み込みます**。欠けると API やワーカーが落ちます。
 - `tar xzf` の上書き展開では、**送る側で消したパスがサーバから消えない**ことがあります（`tar-scp.sh` 先頭コメント）。挙動がおかしいときはサーバ上のツリーと差分を確認してください。

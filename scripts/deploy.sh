@@ -14,6 +14,8 @@
 # DEPLOY_USE_TAR=1 … ローカルで tar.gz 化し 1 本の ssh ストリームで展開（小ファイル多い・遅延大きい回線で速くなることがある）。
 #   Docker ビルド時間やデーモンへのコンテキスト量は変わらない。リモートでローカルから消したファイルは残る（rsync --delete 相当ではない）。
 #
+# リモートでは scripts/server-rebuild.sh を実行（compose の --rmi local のみ。ホスト全体の prune は既定ではしない。data は削除しない）。
+#
 
 set -eu
 
@@ -79,9 +81,9 @@ else
   "${RSYNC[@]}" "${ROOT}/" "${RSYNC_DEST}"
 fi
 
-REMOTE_COMPOSE="docker stop mm-api mm-frontend whisper-worker 2>/dev/null || true; docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true; echo '--- docker compose build（複数サービスは並列のため #7/#8 などが交互に出ます。ループではありません）---'; docker compose up -d --build || docker-compose up -d --build"
+REMOTE_REBUILD="bash scripts/server-rebuild.sh"
 
-echo "==> ${REMOTE}: docker compose（転送が巨大ならリモートに .dockerignore があるか確認）"
-"${SSH_BIN}" "${REMOTE}" bash -lc "${CD_PREFIX} && ${REMOTE_COMPOSE}"
+echo "==> ${REMOTE}: ${REMOTE_REBUILD}（転送が巨大ならリモートに .dockerignore があるか確認）"
+"${SSH_BIN}" "${REMOTE}" bash -lc "${CD_PREFIX} && ${REMOTE_REBUILD}"
 
 echo "==> done"

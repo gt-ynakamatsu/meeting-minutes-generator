@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.3
+
+- **server-rebuild**: イメージ掃除を **`docker compose down --rmi local`（この compose のビルドイメージのみ）**に限定。ホスト全体の `docker image prune` / `builder prune` は既定では実行しない（必要なら `GLOBAL_IMAGE_PRUNE` / `GLOBAL_BUILDER_PRUNE`）
+
+## 2.3.2
+
+- **運用**: サーバ向け `scripts/server-rebuild.sh`（Windows は `scripts/server-rebuild.bat`）— 再ビルド・起動。`down -v` や `volume prune` は行わず **`data` / `downloads` を保持**
+- **deploy.sh**: リモート実行を `server-rebuild.sh` に統一
+
 ## 2.3.1
 
 - **Whisper / VRAM**: 文字起こしを環境変数で調整可能に（`WHISPER_MODEL`・`WHISPER_DEVICE`・`WHISPER_COMPUTE_TYPE`）。CUDA OOM 時の緩和策を README / `.env.example`・UI トラブルシューティングに追記
