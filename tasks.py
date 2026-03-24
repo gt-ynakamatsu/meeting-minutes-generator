@@ -550,26 +550,17 @@ def process_video_task(
                 extraction_errors.append(f"Chunk {i}: {str(e)}")
 
         if not extracted_results:
-            error_msg = (
+            detail = (
                 f"## ⚠️ 議事録生成エラー\n\nAIによる抽出に失敗しました。\n\n**考えられる原因:**\n"
                 f"1. Ollamaモデル (`{ollama_model}`) が未ダウンロード、または OpenAI キー／モデル指定が不正\n"
                 "2. LLM サーバが応答していない、またはタイムアウト\n"
                 "3. カスタム抽出プロンプトに `{CHUNK_TEXT}` が含まれていない\n\n**デバッグ情報:**\n"
             )
             if extraction_errors:
-                error_msg += "\n".join(extraction_errors[:5])
+                detail += "\n".join(extraction_errors[:5])
             else:
-                error_msg += "No errors captured, but no JSON data was extracted."
-
-            db.update_record(task_id, owner_username or "", status="completed", summary=error_msg)
-            try:
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                pass
-            _cleanup_user_prompts(task_id)
+                detail += "No errors captured, but no JSON data was extracted."
+            fail(detail)
             return
 
         if _record_cancelled(task_id, owner_username or ""):

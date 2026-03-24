@@ -552,8 +552,8 @@ function RecordCard({
 
       {statusStr === "completed" ? (
         <>
-          <div className="tabs-record-toolbar">
-            <div className="tabs tabs--record tabs--record--modes" role="tablist" aria-label="表示モード">
+          <div className="tabs tabs--record">
+            <div className="tabs--record__modes">
               <button type="button" className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>
                 プレビュー
               </button>
@@ -564,10 +564,10 @@ function RecordCard({
                 書き起こし
               </button>
             </div>
-            <div className="tabs--record__actions-row" aria-label="書き出し">
+            <div className="tabs--record__tail-actions">
               <button
                 type="button"
-                className="btn-record-outline"
+                className="tabs--record__tool"
                 title="現在保存されているプレビュー内容を別ウィンドウで開きます"
                 disabled={!summary.trim() || summary === "None"}
                 onClick={() => {
@@ -579,7 +579,7 @@ function RecordCard({
               </button>
               <button
                 type="button"
-                className="btn-record-outline"
+                className="tabs--record__tool"
                 title="議事録を Markdown ファイルでダウンロードします"
                 disabled={!summary.trim() || summary === "None"}
                 onClick={() =>
@@ -1256,6 +1256,10 @@ function AppMain({
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
   const [fileDropActive, setFileDropActive] = useState(false);
   const fileDragDepth = useRef(0);
+  const mainFileInputRef = useRef<HTMLInputElement>(null);
+  const pendingIdsRef = useRef<string[]>(pendingIds);
+  /** 破棄・pending 追加のたびに増やし、古い tick の setPendingIds を無効化する */
+  const pendingPollRevisionRef = useRef(0);
 
   const onTaskFileDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -1363,11 +1367,20 @@ function AppMain({
   }, [pendingIds]);
 
   useEffect(() => {
-    if (pendingIds.length === 0) return;
+    pendingIdsRef.current = pendingIds;
+  }, [pendingIds]);
+
+  const hasPendingBrowserPoll = pendingIds.length > 0;
+
+  useEffect(() => {
+    if (!hasPendingBrowserPoll) return;
     const tick = async () => {
       try {
-        const next: string[] = [];
-        for (const id of pendingIds) {
+        const idsSnapshot = [...pendingIdsRef.current];
+        if (idsSnapshot.length === 0) return;
+        const revAtStart = pendingPollRevisionRef.current;
+        const stillActive = new Set<string>();
+        for (const id of idsSnapshot) {
           const r = await getRecord(id);
           const st = r.status != null ? String(r.status) : "";
           const sum = r.summary != null ? String(r.summary) : "";
@@ -1394,8 +1407,7 @@ function AppMain({
               await discardRecord(id);
               errorNotifiedRef.current.delete(id);
             } catch {
-              next.push(id);
-              continue;
+              stillActive.add(id);
             }
             continue;
           }
@@ -1416,9 +1428,21 @@ function AppMain({
             errorNotifiedRef.current.delete(id);
             continue;
           }
-          next.push(id);
+          stillActive.add(id);
         }
-        setPendingIds(next);
+        if (revAtStart !== pendingPollRevisionRef.current) return;
+        setPendingIds((prev) => {
+          if (revAtStart !== pendingPollRevisionRef.current) return prev;
+          const out: string[] = [];
+          for (const id of prev) {
+            if (idsSnapshot.includes(id)) {
+              if (stillActive.has(id)) out.push(id);
+            } else {
+              out.push(id);
+            }
+          }
+          return out;
+        });
         await refreshRecords();
         await refreshQueue();
       } catch {
@@ -1428,7 +1452,7 @@ function AppMain({
     const h = window.setInterval(tick, 10_000);
     void tick();
     return () => window.clearInterval(h);
-  }, [pendingIds, refreshRecords, refreshQueue]);
+  }, [hasPendingBrowserPoll, refreshRecords, refreshQueue]);
 
   const presetEntries = useMemo(() => {
     return Object.entries(presets).sort(([a], [b]) => {
@@ -1462,6 +1486,7 @@ function AppMain({
       if (!window.confirm("このジョブの処理を破棄しますか？\n投入した原稿ファイルはサーバから削除されます。")) return;
       try {
         await discardRecord(id);
+        pendingPollRevisionRef.current += 1;
         setPendingIds((p) => p.filter((x) => x !== id));
         await refreshQueue();
         await refreshRecords();
@@ -1507,10 +1532,13 @@ function AppMain({
     try {
       const res = await createTask(fd);
       if (notification === "browser") {
+        pendingPollRevisionRef.current += 1;
         setPendingIds((p) => [...p, res.task_id]);
       }
       setMsg("受け付けました。処理が始まるまで少しお待ちください。");
       setFile(null);
+      const fin = mainFileInputRef.current;
+      if (fin) fin.value = "";
     } catch (ex) {
       setErr(String(ex));
     }
@@ -1734,6 +1762,7 @@ function AppMain({
             <div className="main-file-picker__heading">解析するファイル</div>
             <label htmlFor="mm-main-file" className="main-file-drop">
               <input
+                ref={mainFileInputRef}
                 id="mm-main-file"
                 form="mm-task-form"
                 type="file"

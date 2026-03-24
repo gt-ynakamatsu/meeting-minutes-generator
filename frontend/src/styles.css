@@ -630,58 +630,68 @@ body {
   margin: 0.5rem 0;
 }
 
-.tabs-record-toolbar {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.45rem;
-  margin: 0.5rem 0;
-}
-
-.tabs-record-toolbar > .tabs {
-  margin: 0;
-}
-
+/* Grid: 左にタブ群・右にツールを「常に同じ行の2カラム」に固定（flex+wrap だと幅不足でツールだけ下段に落ちる） */
 .tabs--record {
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 0.65rem;
+  row-gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: auto;
 }
 
-.tabs--record--modes {
-  margin: 0;
-}
-
-.tabs--record__actions-row {
+.tabs--record__modes {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: 0.35rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border);
+  align-items: center;
+  min-width: 0;
 }
 
-.tabs--record__actions-row .btn-record-outline {
+.tabs--record__tail-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.35rem;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: start;
+  white-space: nowrap;
+}
+
+/* プレビュー行の右側ツール（別ウィンドウ・ダウンロード）— 見た目を揃える */
+.tabs--record .tabs--record__tool {
   box-sizing: border-box;
-  min-height: 2.15rem;
-  padding: 0.4rem 0.7rem;
+  margin: 0;
   border: 1px solid var(--accent);
-  border-radius: 8px;
   background: #fff;
   color: var(--accent);
-  font: inherit;
   font-weight: 600;
   font-size: 0.8rem;
-  line-height: 1.25;
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
   cursor: pointer;
+  font: inherit;
 }
 
-.tabs--record__actions-row .btn-record-outline:hover:not(:disabled) {
+.tabs--record .tabs--record__tool:hover:not(:disabled) {
   background: rgba(45, 106, 79, 0.08);
 }
 
-.tabs--record__actions-row .btn-record-outline:disabled {
+.tabs--record .tabs--record__tool:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.tabs--record .tabs--record__tool:focus {
+  outline: none;
+}
+
+.tabs--record .tabs--record__tool:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .tabs button {
