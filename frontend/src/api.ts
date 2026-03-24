@@ -51,6 +51,10 @@ export interface RecordRow {
   transcript: string | null;
   summary: string | null;
   created_at: string;
+  /** ワーカーが pending から初めて処理を進めた時刻（DB マイグレーション前は無し） */
+  processing_started_at?: string | null;
+  /** 完了またはエラー終了時刻 */
+  processing_finished_at?: string | null;
   topic: string | null;
   tags: string | null;
   category: string | null;
@@ -239,6 +243,13 @@ export async function patchSummary(id: string, summary: string): Promise<{ ok: b
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ summary }),
+  });
+  return handle(res);
+}
+
+export async function discardRecord(id: string): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${PREFIX}/api/records/${encodeURIComponent(id)}/discard`, {
+    method: "POST",
   });
   return handle(res);
 }

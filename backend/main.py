@@ -388,6 +388,7 @@ async def create_task(
             prompt_paths,
             owner,
         ],
+        task_id=task_id,
     )
 
     return {"task_id": task_id, "filename": safe_name}
@@ -423,6 +424,25 @@ def get_record(task_id: str, _auth: ApiUser):
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     return _row_to_dict(row)
+
+
+@app.post("/api/records/{task_id}/discard")
+def discard_record(task_id: str, _auth: ApiUser):
+    """待機・実行中のジョブを破棄する（DB を cancelled、Celery を revoke、投入ファイルを削除）。"""
+    owner = (_auth or "").strip()
+    try:
+        db.discard_task(task_id, owner)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="not found") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    db.remove_task_upload_files(task_id)
+    db.cleanup_user_prompts_dir(task_id)
+    try:
+        celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+    except Exception:
+        logging.getLogger(__name__).debug("celery revoke failed for %s", task_id, exc_info=True)
+    return {"ok": True}
 
 
 @app.get("/api/records/{task_id}/export/minutes")

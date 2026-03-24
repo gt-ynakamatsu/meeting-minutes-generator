@@ -304,6 +304,23 @@ def _cleanup_user_prompts(task_id):
         pass
 
 
+def _record_cancelled(task_id: str, owner: str) -> bool:
+    row = db.get_record(task_id, owner or "")
+    if not row:
+        return False
+    return (row["status"] or "").strip() == "cancelled"
+
+
+def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None):
+    _cleanup_user_prompts(task_id)
+    for p in (file_path, audio_path):
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
 def _assemble_extract_prompt(base_template, record, preset_extract_hint):
     ctx = build_meeting_context_block(record)
     parts = []
@@ -343,6 +360,15 @@ def process_video_task(
     if not record:
         return
 
+    if _record_cancelled(task_id, owner_username or ""):
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
+        _cleanup_user_prompts(task_id)
+        return
+
     ollama_model = (llm_config or {}).get("ollama_model") or DEFAULT_OLLAMA_MODEL
     audio_path = os.path.join("downloads", f"{uuid.uuid4()}.mp3")
 
@@ -359,6 +385,9 @@ def process_video_task(
     is_transcript = ext in (".txt", ".srt")
 
     def fail(msg, exc_info=False):
+        if _record_cancelled(task_id, owner_username or ""):
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            return
         db.update_record(task_id, owner_username or "", status=f"Error: {msg}")
         _cleanup_user_prompts(task_id)
         try:
@@ -371,6 +400,9 @@ def process_video_task(
 
     try:
         if is_transcript:
+            if _record_cancelled(task_id, owner_username or ""):
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                return
             db.update_record(task_id, owner_username or "", status="processing:reading_transcript")
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
@@ -384,6 +416,9 @@ def process_video_task(
                 return
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
         else:
+            if _record_cancelled(task_id, owner_username or ""):
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                return
             db.update_record(task_id, owner_username or "", status="processing:extracting_audio")
             video = None
             try:
@@ -393,6 +428,9 @@ def process_video_task(
                 if video:
                     video.close()
 
+            if _record_cancelled(task_id, owner_username or ""):
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                return
             db.update_record(task_id, owner_username or "", status="processing:transcribing")
             model = WhisperModel("medium", device="cuda", compute_type="float16")
             raw_segments, _ = model.transcribe(audio_path)
@@ -414,6 +452,9 @@ def process_video_task(
         total_chunks = len(chunks_for_ai)
 
         for i, chunk_text in enumerate(chunks_for_ai):
+            if _record_cancelled(task_id, owner_username or ""):
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                return
             db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
             prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
             try:
@@ -448,6 +489,9 @@ def process_video_task(
             _cleanup_user_prompts(task_id)
             return
 
+        if _record_cancelled(task_id, owner_username or ""):
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            return
         db.update_record(task_id, owner_username or "", status="processing:merging")
 
         combined_data = {"decisions": [], "issues": [], "items": [], "notes": []}
@@ -503,6 +547,9 @@ def process_video_task(
         import traceback
 
         traceback.print_exc()
+        if _record_cancelled(task_id, owner_username or ""):
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            return
         db.update_record(task_id, owner_username or "", status=f"Error: {str(e)}")
         _cleanup_user_prompts(task_id)
         try:

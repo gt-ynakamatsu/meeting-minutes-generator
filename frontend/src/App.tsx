@@ -8,6 +8,7 @@ import {
   adminSetRole,
   bootstrapRequest,
   createTask,
+  discardRecord,
   downloadExportMinutes,
   downloadExportTranscript,
   getAuthMe,
@@ -30,8 +31,90 @@ import {
   type RecordRow,
   type TaskSubmitMetadata,
 } from "./api";
+import { jobStatusShortLabel, parseJobStatus } from "./jobStatus";
 
 const LS_PENDING = "mm_pending_tasks";
+
+function formatDbDateTime(value: string | null | undefined): string {
+  if (value == null || String(value).trim() === "") return "—";
+  const raw = String(value).trim();
+  const normalized = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) return raw;
+  try {
+    return d.toLocaleString("ja-JP", { dateStyle: "short", timeStyle: "medium" });
+  } catch {
+    return raw;
+  }
+}
+
+function clampPct(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function JobProgressPanel({ status, compact = false }: { status: string | null | undefined; compact?: boolean }) {
+  const p = parseJobStatus(String(status ?? ""));
+  const cls = compact ? "job-progress job-progress--compact" : "job-progress";
+  const ov = clampPct(p.overallPercent);
+  const ph = clampPct(p.phasePercent);
+
+  if (p.kind === "error") {
+    return (
+      <div className={cls}>
+        <div className="job-progress__title job-progress__title--error">{p.title}</div>
+        {p.detail ? <div className="job-progress__detail">{p.detail}</div> : null}
+      </div>
+    );
+  }
+
+  if (p.kind === "cancelled") {
+    return (
+      <div className={cls}>
+        <div className="job-progress__title job-progress__title--cancelled">{p.title}</div>
+        {p.detail ? (
+          <div className="job-progress__detail muted" style={{ fontSize: compact ? "0.78rem" : "0.82rem" }}>
+            {p.detail}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (p.kind === "completed") {
+    return (
+      <div className={cls}>
+        <div className="job-progress__title">{p.title}</div>
+        <div className="job-progress__meta">
+          <span>全体</span>
+          <span>100%</span>
+        </div>
+        <progress className="job-progress__bar job-progress__bar--overall" max={100} value={100} />
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls}>
+      <div className="job-progress__title">{p.title}</div>
+      {p.detail ? (
+        <div className="job-progress__detail muted" style={{ fontSize: compact ? "0.78rem" : "0.82rem" }}>
+          {p.detail}
+        </div>
+      ) : null}
+      <div className="job-progress__meta">
+        <span>全体の進捗（目安）</span>
+        <span>{ov}%</span>
+      </div>
+      <progress className="job-progress__bar job-progress__bar--overall" max={100} value={ov} />
+      <div className="job-progress__meta">
+        <span>現在の工程</span>
+        <span>{ph}%</span>
+      </div>
+      <progress className="job-progress__bar job-progress__bar--phase" max={100} value={ph} />
+    </div>
+  );
+}
 
 function UserCircleIcon() {
   return (
@@ -226,7 +309,19 @@ function MinutesBody({ text }: { text: string }) {
   }
 }
 
-function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
+function recordIsActiveJob(status: string): boolean {
+  return status === "pending" || status.startsWith("processing");
+}
+
+function RecordCard({
+  row,
+  onSaved,
+  onDiscard,
+}: {
+  row: RecordRow;
+  onSaved: () => void | Promise<void>;
+  onDiscard?: (id: string) => void | Promise<void>;
+}) {
   const [tab, setTab] = useState<"preview" | "edit" | "raw">("preview");
   const [editText, setEditText] = useState(row.summary || "");
   const [saving, setSaving] = useState(false);
@@ -245,7 +340,9 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
     }
   }, [row.context_json]);
 
-  const label = `${row.created_at} · ${(row.topic || "").trim() || "（議題なし）"} · ${row.filename} · ${row.status}`;
+  const statusStr = row.status != null ? String(row.status) : "";
+  const statusSummary = statusStr.startsWith("Error") ? "エラー" : jobStatusShortLabel(statusStr);
+  const label = `${formatDbDateTime(row.created_at)} · ${(row.topic || "").trim() || "（議題なし）"} · ${row.filename} · ${statusSummary}`;
 
   return (
     <details className="card" open={false}>
@@ -253,6 +350,10 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
       <p className="muted" style={{ fontSize: "0.85rem" }}>
         分類: {row.category || "—"} ／ タグ: {row.tags || "—"} ／ プリセット: {row.preset_id || "—"} ／ 日付:{" "}
         {row.meeting_date || "—"}
+      </p>
+      <p className="muted" style={{ fontSize: "0.8rem", margin: "0.35rem 0 0" }}>
+        受付: {formatDbDateTime(row.created_at)} ／ 処理開始: {formatDbDateTime(row.processing_started_at)} ／
+        処理終了: {formatDbDateTime(row.processing_finished_at)}
       </p>
       {ctx && Object.values(ctx).some(Boolean) ? (
         <details>
@@ -267,7 +368,7 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
         </details>
       ) : null}
 
-      {row.status === "completed" ? (
+      {statusStr === "completed" ? (
         <>
           <div className="tabs">
             <button type="button" className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>
@@ -342,10 +443,16 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
             </div>
           ) : null}
         </>
-      ) : row.status.startsWith("Error") ? (
+      ) : statusStr === "cancelled" ? (
+        <div className="cancelled-box">
+          <p className="muted" style={{ margin: 0, fontSize: "0.88rem" }}>
+            このジョブは破棄されました。アップロードされた原稿ファイルはサーバから削除されています。
+          </p>
+        </div>
+      ) : statusStr.startsWith("Error") ? (
         <div className="error-box">
           <strong>エラー</strong>
-          <div>{row.status}</div>
+          <div>{statusStr}</div>
           <details style={{ marginTop: "0.5rem" }}>
             <summary>トラブルシューティング</summary>
             <ul className="muted" style={{ fontSize: "0.85rem" }}>
@@ -358,7 +465,25 @@ function RecordCard({ row, onSaved }: { row: RecordRow; onSaved: () => void }) {
           </details>
         </div>
       ) : (
-        <p className="muted">ステータス: {row.status}</p>
+        <div>
+          {recordIsActiveJob(statusStr) && onDiscard ? (
+            <p style={{ margin: "0 0 0.5rem" }}>
+              <button
+                type="button"
+                className="btn-discard"
+                onClick={() => {
+                  void onDiscard(row.id);
+                }}
+              >
+                処理を破棄
+              </button>
+            </p>
+          ) : null}
+          <JobProgressPanel status={statusStr} />
+          <p className="muted" style={{ fontSize: "0.75rem", margin: "0.5rem 0 0" }}>
+            生ステータス: <code>{statusStr || "—"}</code>
+          </p>
+        </div>
       )}
     </details>
   );
@@ -877,7 +1002,15 @@ function AppMain({
   const refreshRecords = useCallback(async () => {
     const cat = filterCat === "（すべて）" ? "" : filterCat;
     const st =
-      filterStatus === "（すべて）" ? "" : filterStatus === "完了" ? "completed" : filterStatus === "エラー" ? "error" : "processing";
+      filterStatus === "（すべて）"
+        ? ""
+        : filterStatus === "完了"
+          ? "completed"
+          : filterStatus === "エラー"
+            ? "error"
+            : filterStatus === "破棄"
+              ? "cancelled"
+              : "processing";
     const rows = await listRecords({ days: 7, search, category: cat, status_filter: st });
     setRecords(rows);
   }, [search, filterCat, filterStatus]);
@@ -935,13 +1068,15 @@ function AppMain({
         const next: string[] = [];
         for (const id of pendingIds) {
           const r = await getRecord(id);
-          if (r.status === "completed") {
+          const st = r.status != null ? String(r.status) : "";
+          if (st === "completed") {
             if (Notification.permission === "granted") {
               new Notification("議事録ができました", { body: r.filename });
             }
             continue;
           }
-          if (r.status.startsWith("Error")) continue;
+          if (st.startsWith("Error")) continue;
+          if (st === "cancelled") continue;
           next.push(id);
         }
         setPendingIds(next);
@@ -973,6 +1108,21 @@ function AppMain({
     setSettingsOpen(false);
     setSettingsTab("general");
   }, []);
+
+  const handleDiscardTask = useCallback(
+    async (id: string) => {
+      if (!window.confirm("このジョブの処理を破棄しますか？\n投入した原稿ファイルはサーバから削除されます。")) return;
+      try {
+        await discardRecord(id);
+        setPendingIds((p) => p.filter((x) => x !== id));
+        await refreshQueue();
+        await refreshRecords();
+      } catch (e) {
+        alert(String(e));
+      }
+    },
+    [refreshQueue, refreshRecords],
+  );
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1019,8 +1169,8 @@ function AppMain({
   };
 
   return (
-    <div className="layout">
-      <header className="hero">
+    <div className="layout layout--app">
+      <header className="hero hero--compact">
         <div className="hero-top">
           <div className="hero-top-actions">
             <AccountMenuDropdown
@@ -1068,12 +1218,13 @@ function AppMain({
           </div>
         </div>
         <h1>AI 議事録アーカイブ</h1>
-        <p className="muted">
-          動画・音声、または文字起こし済みテキスト・SRT から議事録を作成します。ファイルを選んで左のフォームを埋め、キューに投入してください。下のアーカイブで結果を確認できます。
+        <p className="muted hero--tagline">
+          左で会議情報とファイルを指定して投入。右でキューとアーカイブを確認します（一覧は下段のみスクロール）。
         </p>
       </header>
 
-      <aside className="sidebar">
+      <div className="layout-columns">
+      <aside className="sidebar sidebar--scroll">
         <form id="mm-task-form" onSubmit={onSubmit}>
           <h3>会議情報</h3>
           <label>議題（任意）</label>
@@ -1190,74 +1341,107 @@ function AppMain({
 
           {msg ? <p className="muted">{msg}</p> : null}
           {err ? <p className="error-box">{err}</p> : null}
-
-          <button className="btn-primary" type="submit" disabled={!canSubmit}>
-            解析をキューに追加
-          </button>
         </form>
       </aside>
 
-      <main className="main">
-        <div className="main-file-picker">
-          <label htmlFor="mm-main-file">解析するファイル</label>
-          <input
-            id="mm-main-file"
-            form="mm-task-form"
-            type="file"
-            accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-          {file ? (
-            <p className="muted" style={{ fontSize: "0.85rem", margin: "0.35rem 0 0" }}>
-              選択中: <strong>{file.name}</strong>
-            </p>
-          ) : (
-            <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0" }}>
-              .mp4 / .mp3 / .m4a / .wav / .txt / .srt
-            </p>
-          )}
+      <main className="main main--stack">
+        <div className="main-pane-top">
+          <div className="main-file-picker main-file-picker--tight">
+            <label htmlFor="mm-main-file">解析するファイル</label>
+            <div className="main-file-picker__file-row">
+              <input
+                id="mm-main-file"
+                form="mm-task-form"
+                type="file"
+                accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+              <button
+                className="btn-primary btn-primary--queue-submit"
+                type="submit"
+                form="mm-task-form"
+                disabled={!canSubmit}
+              >
+                解析をキューに追加
+              </button>
+            </div>
+            {file ? (
+              <p className="muted main-file-picker__hint">
+                選択中: <strong>{file.name}</strong>
+              </p>
+            ) : (
+              <p className="muted main-file-picker__hint">
+                .mp4 / .mp3 / .m4a / .wav / .txt / .srt
+              </p>
+            )}
+          </div>
+
+          <section className="main-queue" aria-label="処理キュー">
+            <h2 className="main-subhead">処理キュー</h2>
+            <div className="queue">
+              {queue.length === 0 ? (
+                <p className="muted" style={{ fontSize: "0.85rem", margin: 0 }}>
+                  待機・実行中のジョブはありません。
+                </p>
+              ) : (
+                <ul className="queue-list">
+                  {queue.map((q) => (
+                    <li key={q.id} className="queue-card">
+                      <div className="queue-card__head">
+                        <strong>{q.topic || "（議題なし）"}</strong>
+                        <span className="muted queue-card__file">{q.filename}</span>
+                      </div>
+                      <div className="queue-card__times muted">
+                        受付 {formatDbDateTime(q.created_at)}
+                        {q.processing_started_at ? ` · 処理開始 ${formatDbDateTime(q.processing_started_at)}` : ""}
+                        {q.processing_finished_at ? ` · 処理終了 ${formatDbDateTime(q.processing_finished_at)}` : ""}
+                      </div>
+                      <p style={{ margin: "0 0 0.35rem" }}>
+                        <button type="button" className="btn-discard btn-discard--compact" onClick={() => handleDiscardTask(q.id)}>
+                          処理を破棄
+                        </button>
+                      </p>
+                      <JobProgressPanel status={q.status != null ? String(q.status) : ""} compact />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
         </div>
 
-        <h2>処理キュー</h2>
-        <div className="queue">
-          {queue.length === 0 ? (
-            <p className="muted">待機・実行中のジョブはありません。</p>
-          ) : (
-            <ul>
-              {queue.map((q) => (
-                <li key={q.id}>
-                  <strong>{q.topic || "（議題なし）"}</strong> · {q.filename} · <code>{q.status}</code>
-                </li>
+        <section className="main-pane-archive" aria-label="議事録アーカイブ">
+          <h2 className="main-subhead">議事録アーカイブ</h2>
+          <div className="filters filters--tight">
+            <input placeholder="キーワード検索" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
+              {["（すべて）", "未分類", "社内", "顧客・社外", "その他"].map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
               ))}
-            </ul>
-          )}
-        </div>
-
-        <h2>議事録アーカイブ</h2>
-        <div className="filters">
-          <input placeholder="キーワード検索" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
-            {["（すべて）", "未分類", "社内", "顧客・社外", "その他"].map((c) => (
+            </select>
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+            {["（すべて）", "完了", "エラー", "破棄", "処理中"].map((c) => (
               <option key={c} value={c}>
                 {c}
               </option>
             ))}
           </select>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-            {["（すべて）", "完了", "エラー", "処理中"].map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
+          </div>
 
-        {records.length === 0 ? (
-          <p className="muted">該当する記録がありません。</p>
-        ) : (
-          records.map((r) => <RecordCard key={r.id} row={r} onSaved={refreshRecords} />)
-        )}
+          <div className="main-archive-scroll">
+            {records.length === 0 ? (
+              <p className="muted">該当する記録がありません。</p>
+            ) : (
+              records.map((r) => (
+                <RecordCard key={r.id} row={r} onSaved={refreshRecords} onDiscard={handleDiscardTask} />
+              ))
+            )}
+          </div>
+        </section>
       </main>
+      </div>
 
       <SettingsDrawer
         open={settingsOpen}
@@ -1410,7 +1594,7 @@ function AppMain({
         ) : null}
       </SettingsDrawer>
 
-      <footer className="footer">Meeting Minutes Generator · v{version || "…"}</footer>
+      <footer className="footer footer--app">Meeting Minutes Generator · v{version || "…"}</footer>
     </div>
   );
 }

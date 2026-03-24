@@ -1,6 +1,8 @@
+import glob
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
@@ -40,6 +42,8 @@ def _migrate_records_columns(conn):
         ("meeting_date", "TEXT DEFAULT ''"),
         ("preset_id", "TEXT DEFAULT ''"),
         ("context_json", "TEXT DEFAULT ''"),
+        ("processing_started_at", "TIMESTAMP"),
+        ("processing_finished_at", "TIMESTAMP"),
     ]
     for col, decl in additions:
         if col not in existing:
@@ -400,12 +404,65 @@ def save_initial_task(
 def update_record(task_id, owner: str = "", status=None, transcript=None, summary=None):
     path = minutes_db_path(owner)
     with sqlite3.connect(path) as conn:
+        _ensure_minutes_schema(conn)
         if status is not None:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT status FROM records WHERE id=?", (task_id,)).fetchone()
+            if row:
+                old_status = row["status"] or ""
+                now = datetime.now()
+                if old_status == "pending" and status != "pending":
+                    conn.execute(
+                        "UPDATE records SET processing_started_at = COALESCE(processing_started_at, ?) WHERE id=?",
+                        (now, task_id),
+                    )
+                if status == "completed" or status == "cancelled" or (
+                    isinstance(status, str) and status.startswith("Error")
+                ):
+                    conn.execute(
+                        "UPDATE records SET processing_finished_at = ? WHERE id=?",
+                        (now, task_id),
+                    )
             conn.execute("UPDATE records SET status=? WHERE id=?", (status, task_id))
         if transcript is not None:
             conn.execute("UPDATE records SET transcript=? WHERE id=?", (transcript, task_id))
         if summary is not None:
             conn.execute("UPDATE records SET summary=? WHERE id=?", (summary, task_id))
+
+
+def remove_task_upload_files(task_id: str) -> None:
+    """API 破棄時: downloads 直下の {task_id}_* を削除。"""
+    pattern = os.path.join("downloads", f"{task_id}_*")
+    for p in glob.glob(pattern):
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def cleanup_user_prompts_dir(task_id: str) -> None:
+    d = os.path.join(DATA_DIR, "user_prompts", task_id)
+    try:
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def discard_task(task_id: str, owner: str = "") -> None:
+    """pending / processing* のジョブを cancelled にする。完了・エラー・破棄済みは不可。"""
+    row = get_record(task_id, owner or "")
+    if not row:
+        raise KeyError(task_id)
+    st = (row["status"] or "").strip()
+    if st in ("completed", "cancelled"):
+        raise ValueError("すでに終了しているため破棄できません")
+    if st.startswith("Error"):
+        raise ValueError("エラー終了済みのため破棄できません")
+    if st != "pending" and not st.startswith("processing"):
+        raise ValueError("破棄できない状態です")
+    update_record(task_id, owner or "", status="cancelled")
 
 
 def get_recent_records(
@@ -437,6 +494,8 @@ def get_recent_records(
         clauses.append("status = 'completed'")
     elif sf == "error":
         clauses.append("status LIKE 'Error%'")
+    elif sf == "cancelled":
+        clauses.append("status = 'cancelled'")
     elif sf == "processing":
         clauses.append("(status = 'pending' OR status LIKE 'processing%')")
 
