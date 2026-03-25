@@ -17,9 +17,11 @@
 | | タスク状況確認 | 処理中のタスク（文字起こし中、要約中など）の進捗状況をプログレスバーで表示。 |
 | | 議事録閲覧 | 作成完了した議事録をWebブラウザ上で閲覧可能。 |
 | | ダウンロード | 議事録(Markdown形式)および全文テキスト(Text形式)をダウンロード可能。 |
-| | 通知設定 | 完了通知をブラウザ通知またはWebhook（Slack/Chatwork等）で受け取り可能。 |
+| | 通知設定 | 完了通知をブラウザ通知、Webhook（Slack/Chatwork 等）、または **SMTP 設定時はメール**で受け取り可能。 |
 | **AI処理** | 自動文字起こし | Whisperモデルを使用し、高精度な音声認識を行う。 |
-| | 構造化要約 | Ollama (Qwen2.5) を使用し、決定事項・課題・アクション・メモに自動分類・整理する。 |
+| | 構造化要約 | **Ollama**（モデル名はユーザー指定。既定例: qwen2.5:7b）または **OpenAI API**（環境・認証設定に応じて）で、決定事項・課題・アクション・メモに自動分類・整理する。 |
+| | **Ollama モデル候補** | API が `OLLAMA_BASE_URL` の Ollama **`/api/tags`** を中継し、フロントは一覧を **コンボボックス（候補＋自由入力）**で表示。ブラウザから Ollama へ直アクセスしない。 |
+| | **OpenAI 機能フラグ** | 環境変数 **`MM_OPENAI_ENABLED`**（`feature_flags.py`）で OpenAI 連携をオフにできる。オフ時は UI・API とも OpenAI 経路を使わず Ollama のみ（課金 API の無効化・既定 Docker 向け）。 |
 | **管理** | 履歴管理 | 過去の議事録をデータベースで一元管理。 |
 | | 自動クリーンアップ | 処理完了後の中間ファイル（音声・動画）を自動削除し、ストレージを節約。 |
 | **認証** | 初回セットアップ | `MM_AUTH_SECRET` 有効時、ユーザー 0 件なら Web で最初の管理者（**メールアドレス・パスワード**）を登録。 |
@@ -46,11 +48,13 @@ graph TD
         Worker -->|Status| DB
     end
 
+    API -.->|Ollama タグ一覧（UI 候補）| Ollama
     Ollama -->|Models| Models[("Model files")]
 ```
 
 ### 2.3 使用技術スタック
-*   **Frontend**: Streamlit (Python)
+*   **Frontend（本番・推奨）**: React + Vite + TypeScript（Nginx 静的配信、`document/frontend_backend_design.md` 参照）
+*   **Frontend（レガシー）**: Streamlit（`app.py`。ローカル検証・従来 Dockerfile 単体起動向け）
 *   **Backend Task Queue**: Celery
 *   **Message Broker**: Redis
 *   **Database**: SQLite (簡易実装、将来的なPostgreSQL移行を考慮)
@@ -97,8 +101,10 @@ graph TD
     *   2 回目以降: ログイン
     *   管理者: 右上アイコンメニューから「ユーザー・権限管理」→ 設定ドロワーでユーザー運用
 2.  **サイドバー (左側)**
-    *   新規解析依頼フォーム（通知設定、ファイルアップローダー）
-    *   OpenAI 利用時はログインユーザー専用 API キー設定（該当時）
+    *   新規解析依頼フォーム（**通知**: ブラウザ / Webhook / **メール（SMTP 設定時）** / なし、ファイルアップローダー）
+    *   **AI の接続先**: ローカル（Ollama）または OpenAI（`MM_OPENAI_ENABLED` がオンのときのみ UI 表示。オフ時は Ollama のみ・説明文のみ）
+    *   **Ollama モデル名**: `GET /api/ollama/models` で取得したタグを候補にした **コンボボックス**（一覧にないモデルも手入力可）
+    *   **OpenAI**: 認証有効時は **設定ドロワー／一般**でサーバ（registry）に API キー・モデルを保存し、投入時はそのキーを使用。認証オフ時のみフォームからキーを送るモード
 3.  **メインエリア (右側)**
     *   **ヘッダー**: タイトル・右上アカウントアイコン（ドロップダウン：設定・ユーザー権限・サインアウト等）
     *   **議事録一覧**: 直近の履歴をエクスパンダー形式でリスト表示。
@@ -135,11 +141,29 @@ graph TD
 *   **ドライバ**: NVIDIA Driver, NVIDIA Container Toolkit
 
 ## 6. 付録：ディレクトリ構成
-*   `app.py`: フロントエンド実装
-*   `tasks.py`: バックエンド/パイプライン実装
-*   `database.py`: DB操作ラッパー
+*   `frontend/`: React（Vite）SPA。本番ビルドは Nginx 経由で配信。
+*   `backend/main.py`: FastAPI の**組み立てのみ**（CORS・lifespan・`include_router`）。エンドポイント実装は持たない。
+*   `backend/routes/`: **ドメイン別 APIRouter**（実装の見通し用に分割）
+    *   `meta.py` … ヘルス・版情報・Ollama タグ一覧
+    *   `auth.py` … 認証状態・ログイン・初回セットアップ・自己登録・`/auth/me`
+    *   `admin.py` … 管理者ユーザー CRUD
+    *   `profile.py` … `/me/llm`（OpenAI 設定）
+    *   `presets.py` … プリセット JSON 配信
+    *   `jobs.py` … `POST /tasks`（Celery 投入）
+    *   `records.py` … 一覧・キュー・1件・破棄・エクスポート・summary PATCH
+*   `backend/schemas.py`, `backend/deps.py`: Pydantic スキーマ・FastAPI 依存（JWT 管理者等）
+*   `backend/ollama_client.py`: **`OLLAMA_BASE_URL`** 解決、**`/api/tags`**（モデル名一覧）、**`/api/generate` URL**（ワーカー `tasks.py` からも利用）
+*   `backend/presets_io.py`: **`presets_builtin.json`** の読込（**`GET /api/presets`** と **Streamlit `app.py`**・**`tasks.py`** のプリセットで共通化）
+*   `backend/http_utils.py`: エクスポート用 **Content-Disposition**、SQLite 行の **dict 化**
+*   `backend/passwords.py`: ログイン時の **bcrypt 検証**
+*   `backend/storage.py`: ユーザープロンプト一時ファイル保存（**API** と **Streamlit** が同じ関数を利用可能）
+*   `feature_flags.py`: **`MM_OPENAI_ENABLED`** 等の機能 ON/OFF（API・ワーカー・`app.py` で共通化）
+*   `app.py`: Streamlit（レガシー UI。プリセット・プロンプト保存は **`backend.presets_io`** / **`backend.storage`** で API と整合）
+*   `tasks.py`: Celery ワーカー／パイプライン実装（**`backend.ollama_client`**・**`backend.presets_io`** を参照して URL／プリセットを API と整合）
+*   `celery_app.py`: Celery アプリ定義（API はここだけ import して `send_task`）
+*   `database.py`: DB 操作ラッパー（認証時は `registry.db`・ユーザー別 `minutes.db`）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
 ---
-*Last Updated: 2026-03-23（§4.2 秘密情報の扱いを追加し出力例を §4.3 へ。認証をメールログインに合わせて記述）*
+*Last Updated: 2026-03-23（§6 に `backend/routes/` 分割・`ollama_client` / `presets_io` / `http_utils` / `passwords` / `storage` と Streamlit・ワーカーとの共通化を追記）*

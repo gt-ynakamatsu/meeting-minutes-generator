@@ -39,6 +39,7 @@ flowchart LR
   API --> DB
   API --> DL
   API --> UP
+  API -->|tags 一覧| OL
   API -->|send_task| R
   R --> W
   W --> DB
@@ -48,7 +49,7 @@ flowchart LR
 ```
 
 - **フロントエンド**: Vite + React + TypeScript。本番では Nginx が静的ファイルを配信し、`/api/*` を FastAPI にリバースプロキシする。
-- **API サーバ**: FastAPI。DB 読み書き、ファイル受け取り、Celery タスク投入のみ。**Torch / Whisper を import しない**（軽量イメージ化のため）。
+- **API サーバ**: FastAPI。DB 読み書き、ファイル受け取り、Celery タスク投入のみ。**Torch / Whisper を import しない**（軽量イメージ化のため）。エンドポイントは **`backend/main.py`** でアプリを組み立て、**`backend/routes/`**（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records`）に分割。共通処理は **`backend/ollama_client.py`**、**`backend/presets_io.py`**、**`backend/http_utils.py`** 等に集約。
 - **ワーカー**: 従来どおり `tasks.py`（`celery_app` にタスクを登録）。Redis 経由でジョブを受け取る。
 - **共有ボリューム**: `data/`（DB・ユーザープロンプト一時）、`downloads/`（アップロード媒体）。
 
@@ -59,7 +60,7 @@ flowchart LR
 | サービス | イメージ / ビルド | 役割 |
 |----------|-------------------|------|
 | `frontend` | `frontend/Dockerfile` | Nginx + `frontend/dist`、`:8085` で公開 |
-| `api` | `Dockerfile.api` | FastAPI（`requirements-api.txt` のみ） |
+| `api` | `Dockerfile.api` | FastAPI（`requirements-api.txt` のみ）。**`llm-net` 参加**・**`OLLAMA_BASE_URL`** で Ollama の **`/api/tags`** を呼び UI 用モデル一覧を返す。**`MM_OPENAI_ENABLED`** を API・ワーカーに注入 |
 | `worker` | 既存 `Dockerfile` | GPU・Whisper・MoviePy・LLM 呼び出し |
 | `redis` | `redis:alpine` | Celery ブローカー |
 | （外部）Ollama | 運用側で別起動（例: `llm-net` 上） | ローカル LLM。Compose には含めず、ワーカーは `llm-net` ＋ `OLLAMA_BASE_URL` で接続 |
@@ -82,6 +83,24 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 タスク名はモジュール名 `tasks` と関数名から `tasks.process_video_task` となる（ワーカーが `-A tasks` で起動している前提）。
 
+### 4.3 `backend/` パッケージ構成（ルーティングと共通処理）
+
+| モジュール | 役割 |
+|------------|------|
+| `main.py` | `FastAPI` 生成、**CORS**、**lifespan**、`routes` 各 `APIRouter` の `include_router` |
+| `routes/meta.py` | `/api/health`, `/api/version`, `/api/ollama/models` |
+| `routes/auth.py` | `/api/auth/*` |
+| `routes/admin.py` | `/api/admin/*` |
+| `routes/profile.py` | `/api/me/llm` |
+| `routes/presets.py` | `/api/presets`（中身は `presets_io`） |
+| `routes/jobs.py` | `POST /api/tasks` |
+| `routes/records.py` | `/api/records`, `/api/queue`, 破棄・エクスポート・summary |
+| `ollama_client.py` | Ollama の URL 解決・タグ一覧・generate URL（**api** と **tasks.py** で共有） |
+| `presets_io.py` | `presets_builtin.json`（**api**・**tasks.py**・**Streamlit `app.py`** で共有） |
+| `storage.py` | ユーザープロンプト一時ファイル（**api** の multipart と **Streamlit**） |
+| `http_utils.py` | エクスポート用ヘッダ、SQLite 行の dict 化 |
+| `passwords.py` | bcrypt パスワード検証（ログイン） |
+
 ---
 
 ## 5. REST API 仕様（概要）
@@ -91,8 +110,9 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | メソッド | パス | 説明 |
 |----------|------|------|
 | GET | `/api/health` | ヘルスチェック |
+| GET | `/api/ollama/models` | **`{ "models": string[] }`**。サーバが **`OLLAMA_BASE_URL`** の Ollama **`GET /api/tags`** を呼び、各モデルの **`name`** をソートして返す。ブラウザは Ollama に直アクセスしない。**認証**: `ApiUser`（認証オフ時も依存注入は通る） |
 | GET | `/api/version` | `version.py` の版情報 |
-| GET | `/api/presets` | `presets_builtin.json` の内容 |
+| GET | `/api/presets` | `presets_builtin.json` の内容（**`backend/presets_io.load_presets_dict`**、`routes/presets.py`） |
 | POST | `/api/tasks` | `multipart/form-data`: `metadata`（JSON 文字列）、`file`（必須）、任意で `prompt_extract` / `prompt_merge`（.txt） |
 | GET | `/api/records` | クエリ: `days`, `search`, `category`, `status_filter` |
 | GET | `/api/queue` | 待機・処理中レコード一覧 |
@@ -110,13 +130,20 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | PATCH | `/api/admin/users/{login_email}/password` | **管理者のみ**。`{ new_password }`（`login_email` は URL エンコード） |
 | PATCH | `/api/admin/users/{login_email}/role` | **管理者のみ**。`{ is_admin }`（最後の管理者の降格は不可） |
 | DELETE | `/api/admin/users/{login_email}` | **管理者のみ**。自分自身・最後の管理者は不可 |
+| GET | `/api/me/llm` | ログインユーザーの OpenAI 設定の参照。**`{ openai_configured, openai_model, openai_feature_enabled }`**。認証オフ時はキー未設定扱い・モデルは既定文字列。**`MM_OPENAI_ENABLED` オフ**時は `openai_feature_enabled: false`（`openai_configured` も偽として扱う） |
+| PATCH | `/api/me/llm` | **`{ openai_api_key?, openai_model? }`**。registry に保存。**`MM_OPENAI_ENABLED` オフ**のときは 400。認証オフ時は 400（サーバ保存不可） |
+| POST | `/api/records/{task_id}/discard` | 待機・実行中ジョブの破棄。DB を cancelled、**Celery `revoke`（terminate）**、投入ファイル・ユーザープロンプト一時を削除 |
 
 ### 5.1 `POST /api/tasks` の `metadata`（JSON）
 
 `backend/schemas.py` の `TaskSubmitMetadata` に対応。
 
-- 通知: `notification_type` … `browser` | `webhook` | `none`（Webhook 時は `email` 必須）
-- LLM: `llm_provider` … `ollama` | `openai`（OpenAI 時は `openai_api_key` 必須）
+- 通知: `notification_type` … `browser` | `webhook` | **`email`** | `none`（**Webhook** 時は **`email`** フィールド必須。**メール** 時は SMTP 未設定なら 503。認証かつ宛先空ならログイン ID のメールへ送る等、実装参照）
+- LLM: `llm_provider` … `ollama` | `openai`
+  - **`MM_OPENAI_ENABLED` オフ**のとき **`openai` は 400**（Ollama のみ）
+  - **認証有効**かつ OpenAI: フォームのキーではなく **registry に保存された API キー**を使用。未保存なら 400
+  - **認証オフ**かつ OpenAI: 従来どおりリクエストの **`openai_api_key`** 必須
+- Ollama: **`ollama_model`** 文字列（ワーカーが `OLLAMA_BASE_URL` へ接続するときのモデル名）
 - 会議メタ: `topic`, `meeting_date`, `category`, `tags`, `preset_id`
 - 精度用: `context` … `purpose`, `participants`, `glossary`, `tone`, `action_rules`
 
@@ -128,9 +155,12 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 - **技術**: React 18、Vite 5、TypeScript、`react-markdown`（JSON でない要約の表示用）。
 - **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。
+- **ジョブ破棄**: キュー表示などから **`POST /api/records/{task_id}/discard`**（`discardRecord`）を呼び、待機・処理中タスクを取消・ファイル掃除。
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
-- **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・OpenAI（サーバ保存キー）等。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
+- **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
+- **Ollama モデル欄**: マウント時・認証状態更新時に **`GET /api/ollama/models`** で候補を取得。**コンボボックス**（自前の候補リスト＋テキスト入力。`<datalist>` は使わずブラウザ差を抑える）。現在値が一覧に無い場合も候補にマージして表示。
+- **OpenAI オフ時の投入フォーム**: 「AI の接続先」は Ollama のみ表示。**OpenAI 用モデルプルダウンは表示しない**（未使用のため）。
 - **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。**秘密をここに入れないこと**（後述 §7.2）。
 
 ---
@@ -148,8 +178,15 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 |------|----------------|------|
 | JWT 署名鍵・トークン TTL・自己登録可否 | `backend/auth_settings.py`（`MM_AUTH_SECRET`, `MM_AUTH_TOKEN_HOURS`, `MM_AUTH_SELF_REGISTER`） | **秘密鍵はこのモジュール経由でサーバ内のみ**。クライアント JS に含めない。 |
 | registry を使うか（認証の前提） | `database.py` の `_auth_secret_configured()`（`MM_AUTH_SECRET` の有無） | 上記と同じ環境変数を参照。 |
-| CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | 秘密ではないが、**許可先を広げすぎない**こと。 |
+| CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | **ルートハンドラ**は `backend/routes/`。秘密ではないが、**許可先を広げすぎない**こと。 |
 | 議事録保持日数などその他 | `database.py` 等（例: `MM_MINUTES_RETENTION_DAYS`） | サーバ環境変数。 |
+| OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
+| API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
+| プリセット JSON の単一ソース | **`backend/presets_io.py`** | **`routes/presets.py`**・**`tasks.py`**・**Streamlit `app.py`** が同じ読み込み経路を使う。 |
+| エクスポートヘッダ・行 dict 化 | **`backend/http_utils.py`** | **`routes/records.py`** で利用。 |
+| ログイン時パスワード検証 | **`backend/passwords.py`** | **`routes/auth.py`** で利用。 |
+| ユーザープロンプト一時保存 | **`backend/storage.py`** | **`routes/jobs.py`**（multipart）と **Streamlit `app.py`**（バイト列）が同じ保存規約を使う。 |
+| メール通知（SMTP） | API・ワーカー双方に **`MM_SMTP_*`**（`MM_SMTP_HOST`, `MM_SMTP_FROM` 必須など。詳細は `.env.example`） | `email_notify_available` の判定とタスク検証に使用。 |
 | ホスト公開ポート・ブローカ URL | `docker-compose.yml`、`.env` / `.env.example` | **ポート番号自体は「秘密」ではない**が、不要なポートを外向きに開かない運用とセット。 |
 | フロントの API ベース URL | ビルド時 `VITE_API_BASE` → `frontend/src/api.ts` の `PREFIX` | **公開してよい URL のみ**（後述）。 |
 
@@ -186,6 +223,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 ## 8. レガシー（Streamlit）
 
 - **`app.py`**: 引き続きリポジトリに残す。ローカルでは `streamlit run app.py` や従来どおり全量 `Dockerfile` で起動可能。
+- **Python との共通化**: プリセット選択肢は **`backend.presets_io.preset_options_for_ui`**、カスタムプロンプト保存は **`backend.storage.save_uploaded_prompts`**（バイト列）を経由し、**React 経由の API** と同じファイルレイアウト・解釈に揃える。
 - **推奨**: 本番・新規運用は **React + FastAPI + Compose（frontend / api / worker）** を標準とする。
 
 ---
@@ -214,7 +252,9 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **コンテナ内のホスト名**（例: Compose の `redis`、`api`）は Docker のサービス名であり、**特定サーバーの固有名ではない**。Nginx の `proxy_pass http://api:8000` も同様。
 - **ホストマシンや社内 DNS に依存する値**は可能な限り **環境変数**に寄せる:
   - API: `CORS_ORIGINS`（Compose では `MM_CORS_ORIGINS` から渡す）
-  - ワーカー: `CELERY_BROKER_URL`、`OLLAMA_BASE_URL`、`WEBHOOK_URL`
+  - API・ワーカー: **`OLLAMA_BASE_URL`**（API は **`/api/tags`**、ワーカーは推論）、**`MM_OPENAI_ENABLED`**
+  - ワーカー: `CELERY_BROKER_URL`、`WEBHOOK_URL`
+  - メール通知: **`MM_SMTP_*`**（API とワーカーで同一値を推奨）
   - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（`pipeline/02_extract.py`、`03_merge.py`）
   - ローカル開発: リポジトリ直下 `.env` の `VITE_DEV_API_PROXY`（Vite が `/api` を転送する先）
 - **既定値**（例: API の CORS に `localhost:5173`、Celery の `redis://localhost:6379/0`、ワーカーの `OLLAMA_BASE_URL=http://ollama-server:11434`）は **開発・Compose 向けのデフォルト**（`llm-net` 上の Ollama コンテナ名想定）であり、本番では `.env` やオーケストレーション側で上書きすること。
@@ -231,3 +271,5 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.3 | 2026-03-23 | `POST /api/auth/register`・`self_register_allowed`・`MM_AUTH_SELF_REGISTER` |
 | 1.4 | 2026-03-23 | 物理構成の `frontend/Dockerfile` 表記修正。§6 にアカウントドロップダウン・設定ドロワー「一般／ユーザー・権限」タブ・管理者権限 UI を反映 |
 | 1.5 | 2026-03-23 | ログイン ID をメールに合わせ §5 認証 API を更新。**§7.1〜7.4** に設定・秘密のコード所在と外部流出防止を明記 |
+| 1.6 | 2026-03-23 | **`GET /api/ollama/models`**、**`GET/PATCH /api/me/llm`**、**`POST .../discard`**。**`AuthStatus`** の **`email_notify_available` / `openai_enabled`**。**`MM_OPENAI_ENABLED`**・**`feature_flags.py`**・api の **`llm-net` / `OLLAMA_BASE_URL`**。§5.1 の通知・OpenAI 分岐。§6 の Ollama コンボボックス・OpenAI オフ UI。論理構成図に API→Ollama（tags） |
+| 1.7 | 2026-03-23 | **`§4.3`** に `backend/` パッケージ・ルーター対応表を追加。**§7.1** の Ollama／プリセット／http_utils／passwords の所在を **`main.py` 単体記述から更新**。**§8** に Streamlit と `presets_io` / `storage` の共有を追記。**§2** 冒頭の API 説明は維持 |

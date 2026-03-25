@@ -17,6 +17,8 @@ from faster_whisper import WhisperModel
 import torch
 import database as db
 import feature_flags
+from backend.ollama_client import ollama_generate_url
+from backend.presets_io import load_presets_dict
 from moviepy.editor import AudioFileClip, VideoFileClip
 import uuid
 import shutil
@@ -67,12 +69,7 @@ def _notify_task_failure(
         send_task_failure_email(email, filename, task_id, text_detail)
 
 
-def _ollama_generate_url():
-    base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-    return f"{base}/api/generate"
-
-
-OLLAMA_URL = _ollama_generate_url()
+OLLAMA_URL = ollama_generate_url()
 DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
@@ -99,14 +96,7 @@ def load_builtin_presets():
     global _PRESETS_CACHE
     if _PRESETS_CACHE is not None:
         return _PRESETS_CACHE
-    path = os.path.join(os.path.dirname(__file__), "presets_builtin.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            _PRESETS_CACHE = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        _PRESETS_CACHE = {
-            "standard": {"label": "標準", "extract_hint": "", "merge_hint": ""}
-        }
+    _PRESETS_CACHE = load_presets_dict()
     return _PRESETS_CACHE
 
 

@@ -9,9 +9,11 @@ import feature_flags
 from streamlit_autorefresh import st_autorefresh
 from version import __version__
 
+from backend.presets_io import preset_options_for_ui
+from backend.storage import save_uploaded_prompts as save_uploaded_prompts_bytes
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_SVG = os.path.join(APP_DIR, "assets", "svg", "logo.svg")
-PRESETS_PATH = os.path.join(APP_DIR, "presets_builtin.json")
 
 st.set_page_config(
     page_title="AI議事録アーカイブ",
@@ -20,17 +22,6 @@ st.set_page_config(
 )
 
 db.init_db()
-
-
-def load_preset_options():
-    try:
-        with open(PRESETS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return [("standard", "標準")]
-    items = list(data.items())
-    items.sort(key=lambda x: (0 if x[0] == "standard" else 1, x[0]))
-    return [(k, v.get("label", k)) for k, v in items]
 
 
 def inject_ui_styles():
@@ -116,23 +107,9 @@ def render_minutes(text):
 
 
 def save_uploaded_prompts(task_id, extract_file, merge_file):
-    paths = {}
-    base = os.path.join("data", "user_prompts", task_id)
-    if extract_file is not None:
-        os.makedirs(base, exist_ok=True)
-        p = os.path.join(base, "prompt_extract.txt")
-        text = extract_file.getvalue().decode("utf-8", errors="replace")
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(text)
-        paths["extract"] = p
-    if merge_file is not None:
-        os.makedirs(base, exist_ok=True)
-        p = os.path.join(base, "prompt_merge.txt")
-        text = merge_file.getvalue().decode("utf-8", errors="replace")
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(text)
-        paths["merge"] = p
-    return paths if paths else None
+    ex = extract_file.getvalue() if extract_file is not None else None
+    mg = merge_file.getvalue() if merge_file is not None else None
+    return save_uploaded_prompts_bytes(task_id, ex, mg)
 
 
 def render_error_hints(status: str):
@@ -187,7 +164,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-preset_options = load_preset_options()
+preset_options = preset_options_for_ui()
 preset_ids = [p[0] for p in preset_options]
 preset_labels = [p[1] for p in preset_options]
 
