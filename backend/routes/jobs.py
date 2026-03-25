@@ -41,6 +41,11 @@ async def create_task(
     email_for_worker: Optional[str] = None
 
     if meta.notification_type == "email":
+        if not feature_flags.email_notify_feature_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail="メール通知は現在利用できません。ブラウザ・Webhook・なしから選ぶか、管理者に連絡してください。",
+            )
         if auth_enabled() and owner:
             dest = (meta.email or "").strip() or owner
         else:

@@ -13,13 +13,14 @@ import {
   discardRecord,
   downloadExportMinutes,
   downloadExportTranscript,
+  downloadExportTranscriptMd,
   getAuthMe,
   getAuthStatus,
   getPresets,
   getMeLlm,
   getOllamaModels,
   getQueue,
-  getRecord,
+  getRecordOrNull,
   getStoredToken,
   getVersion,
   listRecords,
@@ -51,6 +52,24 @@ function clipForDesktopNotification(text: string, maxLen = 900): string {
   const t = (text || "").trim();
   if (t.length <= maxLen) return t;
   return `${t.slice(0, maxLen)}…`;
+}
+
+function getNotificationPermissionSafe(): NotificationPermission {
+  try {
+    return typeof Notification !== "undefined" ? Notification.permission : "denied";
+  } catch {
+    return "denied";
+  }
+}
+
+/** ユーザー操作後に呼ぶ（投入ボタン・「通知を許可」など） */
+async function requestDesktopNotificationPermission(): Promise<NotificationPermission> {
+  if (typeof Notification === "undefined") return "denied";
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return Notification.permission;
+  }
 }
 
 /** Whisper / PyTorch / CUDA の GPU メモリ・割り当て系とみなす（ログ全文に対して判定） */
@@ -717,7 +736,7 @@ function BootstrapPanel({ onDone }: { onDone: () => void }) {
   return (
     <div className="auth-shell">
       <header className="auth-top-bar">
-        <span className="auth-top-bar-brand">AI 議事録</span>
+        <span className="auth-top-bar-brand">議事録</span>
         <AccountMenuDropdown
           items={[
             { key: "settings", label: "説明・設定", onClick: () => setSettingsOpen(true) },
@@ -986,7 +1005,7 @@ function LoginPanel({
   return (
     <div className="auth-shell">
       <header className="auth-top-bar">
-        <span className="auth-top-bar-brand">AI 議事録</span>
+        <span className="auth-top-bar-brand">議事録</span>
         <AccountMenuDropdown
           items={[
             { key: "settings", label: "説明・設定", onClick: () => setSettingsOpen(true) },
@@ -1117,6 +1136,8 @@ export default function App() {
           auth_required: false,
           bootstrap_needed: false,
           self_register_allowed: false,
+          email_notify_feature_enabled: false,
+          email_notify_available: false,
           openai_enabled: true,
         }),
       );
@@ -1168,6 +1189,7 @@ export default function App() {
       showLogout={showLogout}
       serverOpenaiMode={authStatus.auth_required}
       openaiFeatureEnabled={openaiFeatureEnabled}
+      emailNotifyFeatureEnabled={authStatus.email_notify_feature_enabled === true}
       emailNotifyAvailable={authStatus.email_notify_available === true}
       authNonce={authNonce}
       onLogout={() => {
@@ -1407,6 +1429,7 @@ function AppMain({
   showLogout,
   serverOpenaiMode,
   openaiFeatureEnabled,
+  emailNotifyFeatureEnabled,
   emailNotifyAvailable,
   authNonce,
   onLogout,
@@ -1415,6 +1438,8 @@ function AppMain({
   serverOpenaiMode: boolean;
   /** MM_OPENAI_ENABLED がオフのとき false（OpenAI UI・API を使わない） */
   openaiFeatureEnabled: boolean;
+  /** MM_EMAIL_NOTIFY_ENABLED がオンのとき true（メール通知オプションを表示） */
+  emailNotifyFeatureEnabled: boolean;
   emailNotifyAvailable: boolean;
   authNonce: number;
   onLogout: () => void;
@@ -1429,6 +1454,7 @@ function AppMain({
   const [queue, setQueue] = useState<RecordRow[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>(loadPending);
   const errorNotifiedRef = useRef(new Set<string>());
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission>(getNotificationPermissionSafe);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1548,6 +1574,12 @@ function AppMain({
   }, [openaiFeatureEnabled, llmProvider]);
 
   useEffect(() => {
+    if (!emailNotifyFeatureEnabled && notification === "email") {
+      setNotification("browser");
+    }
+  }, [emailNotifyFeatureEnabled, notification]);
+
+  useEffect(() => {
     if (!serverOpenaiMode || !openaiFeatureEnabled) return;
     getMeLlm()
       .then((m) => {
@@ -1609,88 +1641,136 @@ function AppMain({
     pendingIdsRef.current = pendingIds;
   }, [pendingIds]);
 
+  const syncNotifPermission = useCallback(() => {
+    setNotifPermission(getNotificationPermissionSafe());
+  }, []);
+
+  useEffect(() => {
+    syncNotifPermission();
+    window.addEventListener("focus", syncNotifPermission);
+    return () => window.removeEventListener("focus", syncNotifPermission);
+  }, [syncNotifPermission]);
+
+  const onRequestNotifPermission = useCallback(async () => {
+    const p = await requestDesktopNotificationPermission();
+    setNotifPermission(p);
+  }, []);
+
   const hasPendingBrowserPoll = pendingIds.length > 0;
 
   useEffect(() => {
     if (!hasPendingBrowserPoll) return;
+    const POLL_MS = 5000;
     const tick = async () => {
-      try {
-        const idsSnapshot = [...pendingIdsRef.current];
-        if (idsSnapshot.length === 0) return;
-        const revAtStart = pendingPollRevisionRef.current;
-        const stillActive = new Set<string>();
-        for (const id of idsSnapshot) {
-          const r = await getRecord(id);
-          const st = r.status != null ? String(r.status) : "";
-          const sum = r.summary != null ? String(r.summary) : "";
-          if (st === "completed") {
-            errorNotifiedRef.current.delete(id);
-            if (Notification.permission === "granted") {
-              new Notification("議事録ができました", { body: r.filename || "" });
+      const idsSnapshot = [...pendingIdsRef.current];
+      if (idsSnapshot.length === 0) return;
+      const revAtStart = pendingPollRevisionRef.current;
+      const stillActive = new Set<string>();
+      for (const id of idsSnapshot) {
+        let r: RecordRow | null;
+        try {
+          r = await getRecordOrNull(id);
+        } catch (e) {
+          console.warn(`[mm] getRecord(${id}) に失敗（次のポーリングで再試行）`, e);
+          stillActive.add(id);
+          continue;
+        }
+        if (r == null) {
+          console.warn(`[mm] タスク ${id} が API に存在しません（破棄済み・別ユーザー・期限切れの可能性）。待機リストから外します。`);
+          continue;
+        }
+        const st = r.status != null ? String(r.status) : "";
+        const stNorm = st.trim().toLowerCase();
+        const sum = r.summary != null ? String(r.summary) : "";
+        if (stNorm === "completed") {
+          errorNotifiedRef.current.delete(id);
+          const label = r.filename || id;
+          // タブを前面に開いていると Chrome/Edge などは同じサイトのデスクトップ通知を出さないことが多い（Teams など別アプリとは無関係）
+          setMsg(`議事録が完成しました: ${label}`);
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            try {
+              new Notification("議事録ができました", {
+                body: label,
+                tag: `mm-done-${id}`,
+                silent: false,
+              });
+            } catch (e) {
+              console.warn("[mm] new Notification() に失敗しました", e);
             }
-            continue;
           }
-          if (st.startsWith("Error")) {
+          continue;
+        }
+        if (/^error/i.test(st.trim())) {
+          if (!errorNotifiedRef.current.has(id)) {
+            errorNotifiedRef.current.add(id);
+            const errBody = st.replace(/^Error:\s*/i, "").trim();
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+              new Notification("議事録処理でエラーが発生しました（ジョブを破棄します）", {
+                body: clipForDesktopNotification(errBody || r.filename || ""),
+              });
+            } else {
+              setMsg(`議事録処理でエラーが発生しました（破棄処理中）: ${errBody || r.filename || ""}`);
+            }
+          }
+          try {
+            await discardRecord(id);
+            errorNotifiedRef.current.delete(id);
+          } catch {
+            stillActive.add(id);
+          }
+          continue;
+        }
+        if (stNorm === "cancelled") {
+          if (sum.trimStart().startsWith(TASK_ERROR_SUMMARY_PREFIX)) {
             if (!errorNotifiedRef.current.has(id)) {
               errorNotifiedRef.current.add(id);
-              const errBody = st.replace(/^Error:\s*/i, "").trim();
-              if (Notification.permission === "granted") {
-                new Notification("議事録処理でエラーが発生しました（ジョブを破棄します）", {
-                  body: clipForDesktopNotification(errBody || r.filename || ""),
+              const body = taskErrorDetailFromSummary(sum);
+              if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+                new Notification("議事録処理でエラーが発生しました（ジョブは破棄されました）", {
+                  body: clipForDesktopNotification(body || r.filename || ""),
                 });
               } else {
-                setMsg(`議事録処理でエラーが発生しました（破棄処理中）: ${errBody || r.filename || ""}`);
+                setMsg(`議事録処理でエラー（破棄済み）: ${body || r.filename || ""}`);
               }
             }
-            try {
-              await discardRecord(id);
-              errorNotifiedRef.current.delete(id);
-            } catch {
-              stillActive.add(id);
-            }
-            continue;
           }
-          if (st === "cancelled") {
-            if (sum.trimStart().startsWith(TASK_ERROR_SUMMARY_PREFIX)) {
-              if (!errorNotifiedRef.current.has(id)) {
-                errorNotifiedRef.current.add(id);
-                const body = taskErrorDetailFromSummary(sum);
-                if (Notification.permission === "granted") {
-                  new Notification("議事録処理でエラーが発生しました（ジョブは破棄されました）", {
-                    body: clipForDesktopNotification(body || r.filename || ""),
-                  });
-                } else {
-                  setMsg(`議事録処理でエラー（破棄済み）: ${body || r.filename || ""}`);
-                }
-              }
-            }
-            errorNotifiedRef.current.delete(id);
-            continue;
-          }
-          stillActive.add(id);
+          errorNotifiedRef.current.delete(id);
+          continue;
         }
-        if (revAtStart !== pendingPollRevisionRef.current) return;
-        setPendingIds((prev) => {
-          if (revAtStart !== pendingPollRevisionRef.current) return prev;
-          const out: string[] = [];
-          for (const id of prev) {
-            if (idsSnapshot.includes(id)) {
-              if (stillActive.has(id)) out.push(id);
-            } else {
-              out.push(id);
-            }
+        stillActive.add(id);
+      }
+      if (revAtStart !== pendingPollRevisionRef.current) return;
+      setPendingIds((prev) => {
+        if (revAtStart !== pendingPollRevisionRef.current) return prev;
+        const out: string[] = [];
+        for (const id of prev) {
+          if (idsSnapshot.includes(id)) {
+            if (stillActive.has(id)) out.push(id);
+          } else {
+            out.push(id);
           }
-          return out;
-        });
+        }
+        return out;
+      });
+      try {
         await refreshRecords();
         await refreshQueue();
-      } catch {
-        /* ignore */
+      } catch (e) {
+        console.warn("[mm] 一覧の更新に失敗しました", e);
       }
     };
-    const h = window.setInterval(tick, 10_000);
+    const h = window.setInterval(tick, POLL_MS);
     void tick();
-    return () => window.clearInterval(h);
+    const onVis = () => {
+      if (document.visibilityState === "visible" && pendingIdsRef.current.length > 0) {
+        void tick();
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(h);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [hasPendingBrowserPoll, refreshRecords, refreshQueue]);
 
   const presetEntries = useMemo(() => {
@@ -1702,6 +1782,7 @@ function AppMain({
   }, [presets]);
 
   const emailRecipientOk =
+    !emailNotifyFeatureEnabled ||
     notification !== "email" ||
     (emailNotifyAvailable &&
       (!serverOpenaiMode
@@ -1776,6 +1857,7 @@ function AppMain({
       if (notification === "browser") {
         pendingPollRevisionRef.current += 1;
         setPendingIds((p) => [...p, res.task_id]);
+        void onRequestNotifPermission();
       }
       setMsg("受け付けました。処理が始まるまで少しお待ちください。");
       setFile(null);
@@ -1835,9 +1917,14 @@ function AppMain({
             />
           </div>
         </div>
-        <h1>AI 議事録アーカイブ</h1>
+        <h1>Meeting Minutes Notebook</h1>
         <p className="muted hero--tagline">
-          左パネルで会議情報・LLM・通知などを入力。右の上段の枠をクリックするかドラッグ＆ドロップでファイルを選び「解析をキューに追加」。その下に処理キューとアーカイブ（アーカイブ一覧は画面下の広い領域に表示され、内部でスクロール。狭い画面は上から縦並び）。
+          <strong>使い方:</strong>
+          左のパネルで会議情報・LLM・通知を設定します。右の上ではファイルをクリックまたはドラッグ＆ドロップで選び、「解析をキューに追加」で処理を開始してください。その下の
+          <strong>処理キュー</strong>
+          で進捗を確認できます。動画・音声の場合は文字起こしが終わると「書き起こしをダウンロード」から先に .md を保存できます。完了した議事録は画面下の
+          <strong>議事録アーカイブ</strong>
+          に並び、このエリア内でスクロールして探せます。画面幅が狭いときは、左パネル → ファイル・キュー → アーカイブの順に上から縦に並びます。
         </p>
       </header>
 
@@ -1938,8 +2025,7 @@ function AppMain({
           ) : (
             <>
               <p className="muted" style={{ fontSize: "0.85rem", lineHeight: 1.55, margin: "0 0 0.65rem" }}>
-                OpenAI / ChatGPT は<strong>オフ</strong>です（API キー入力・登録はありません）。解析は{" "}
-                <strong>Ollama のモデル名</strong>で行います。再有効化: サーバに <code>MM_OPENAI_ENABLED=1</code> を設定して再起動。
+                この環境では<strong>ローカル（社内）の AI</strong>のみ利用できます。下のモデル名を指定して解析を依頼してください。
               </p>
               <label>AI の接続先</label>
               <select value="ollama" disabled aria-label="現在はローカル（Ollama）のみ利用可能です">
@@ -1957,18 +2043,46 @@ function AppMain({
           <h3>通知</h3>
           <select
             value={notification}
-            onChange={(e) =>
-              setNotification(e.target.value as "browser" | "webhook" | "email" | "none")
-            }
+            onChange={(e) => {
+              const v = e.target.value as "browser" | "webhook" | "email" | "none";
+              setNotification(v);
+              if (v === "browser") syncNotifPermission();
+            }}
           >
             <option value="browser">ブラウザ</option>
             <option value="webhook">Webhook</option>
-            <option value="email" disabled={!emailNotifyAvailable}>
-              メール（SMTP 設定時）
-            </option>
+            {emailNotifyFeatureEnabled ? (
+              <option value="email" disabled={!emailNotifyAvailable}>
+                メール（SMTP 設定時）
+              </option>
+            ) : null}
             <option value="none">なし</option>
           </select>
-          {!emailNotifyAvailable ? (
+          {notification === "browser" ? (
+            <div className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0", lineHeight: 1.5 }}>
+              {typeof Notification === "undefined" ? (
+                <span>この環境はデスクトップ通知に未対応です。画面上部のメッセージと一覧で完了を確認してください。</span>
+              ) : notifPermission === "denied" ? (
+                <span>
+                  ブラウザが通知を<strong>ブロック</strong>しています。アドレスバーの鍵／サイト設定から通知を許可するか、完了は一覧で確認してください。
+                </span>
+              ) : notifPermission === "default" ? (
+                <span style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                  <span>完了時にデスクトップ通知を出すには OS の許可が必要です。</span>
+                  <button type="button" className="btn-secondary" style={{ width: "auto", marginTop: 0 }} onClick={() => void onRequestNotifPermission()}>
+                    通知を許可
+                  </button>
+                  <span className="muted">（投入ボタン押下時にも許可ダイアログを出します）</span>
+                </span>
+              ) : (
+                <span>
+                  通知は<strong>許可済み</strong>です。数秒ごとに完了を確認します。
+                  このタブを開いたままだと OS のポップアップが出ないことがありますが、<strong>画面上部のメッセージ</strong>と右の一覧で完了が分かります。別タブに切り替えるとポップアップが出やすくなります。
+                </span>
+              )}
+            </div>
+          ) : null}
+          {emailNotifyFeatureEnabled && !emailNotifyAvailable ? (
             <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
               メール通知を使うには、サーバに <code>MM_SMTP_HOST</code> と <code>MM_SMTP_FROM</code> などを設定し、API・ワーカーを再起動してください。
             </p>
@@ -2077,11 +2191,30 @@ function AppMain({
                         {q.processing_started_at ? ` · 処理開始 ${formatDbDateTime(q.processing_started_at)}` : ""}
                         {q.processing_finished_at ? ` · 処理終了 ${formatDbDateTime(q.processing_finished_at)}` : ""}
                       </div>
-                      <p style={{ margin: "0 0 0.35rem" }}>
+                      <div className="queue-card__actions">
+                        <button
+                          type="button"
+                          className="btn-primary btn-primary--queue-submit"
+                          disabled={!q.transcript_ready}
+                          title={
+                            q.transcript_ready
+                              ? "議事録ができる前に .md で保存できます（.txt/.srt 直読みの場合は読み込み直後から可）"
+                              : String(q.status || "") === "processing:transcribing"
+                                ? "Whisper が文字起こし中です。完了までお待ちください"
+                                : "文字起こしが終わると押せます（動画・音声は数十秒〜）"
+                          }
+                          onClick={() =>
+                            void downloadExportTranscriptMd(q.id, `transcript_${exportBasename(q)}.md`).catch((e) =>
+                              alert(String(e)),
+                            )
+                          }
+                        >
+                          書き起こしをダウンロード
+                        </button>
                         <button type="button" className="btn-discard btn-discard--compact" onClick={() => handleDiscardTask(q.id)}>
                           処理を破棄
                         </button>
-                      </p>
+                      </div>
                       <JobProgressPanel status={q.status != null ? String(q.status) : ""} compact />
                     </li>
                   ))}

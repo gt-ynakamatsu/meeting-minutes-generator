@@ -18,13 +18,15 @@ router = APIRouter(tags=["auth"])
 
 @router.get("/api/auth/status", response_model=AuthStatusResponse)
 def auth_status():
-    email_ok = smtp_notify.smtp_configured()
+    email_feat = feature_flags.email_notify_feature_enabled()
+    email_ok = email_feat and smtp_notify.smtp_configured()
     oa = feature_flags.openai_feature_enabled()
     if not auth_enabled():
         return AuthStatusResponse(
             auth_required=False,
             bootstrap_needed=False,
             self_register_allowed=False,
+            email_notify_feature_enabled=email_feat,
             email_notify_available=email_ok,
             openai_enabled=oa,
         )
@@ -33,6 +35,7 @@ def auth_status():
         auth_required=True,
         bootstrap_needed=n == 0,
         self_register_allowed=self_register_enabled() and n > 0,
+        email_notify_feature_enabled=email_feat,
         email_notify_available=email_ok,
         openai_enabled=oa,
     )

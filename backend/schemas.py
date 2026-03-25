@@ -46,7 +46,9 @@ class AuthStatusResponse(BaseModel):
     auth_required: bool
     bootstrap_needed: bool
     self_register_allowed: bool = True
-    # MM_SMTP_HOST / MM_SMTP_FROM が揃っているとき True（メール通知が利用可能）
+    # MM_EMAIL_NOTIFY_ENABLED がオンのとき True（メール通知を UI に出す・API で受け付ける）
+    email_notify_feature_enabled: bool = False
+    # 上記がオンかつ MM_SMTP_* が揃っているとき True（実際にメールを送れる）
     email_notify_available: bool = False
     # MM_OPENAI_ENABLED がオフのとき False（フロントで OpenAI UI を隠す）
     openai_enabled: bool = True

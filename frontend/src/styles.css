@@ -472,6 +472,15 @@ body {
   word-break: break-all;
 }
 
+.queue-card__actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.35rem;
+}
+
 .job-progress {
   margin-top: 0.15rem;
 }

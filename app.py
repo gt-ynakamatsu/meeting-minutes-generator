@@ -16,7 +16,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_SVG = os.path.join(APP_DIR, "assets", "svg", "logo.svg")
 
 st.set_page_config(
-    page_title="AI議事録アーカイブ",
+    page_title="Meeting Minutes Notebook",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -143,7 +143,7 @@ with hero_cols[1]:
         <div class="mm-hero">
         <span class="mm-pill">社内利用</span>
         <span class="mm-pill">GPU 対応</span>
-        <h1 style="margin:0.35rem 0 0.5rem 0;">AI 議事録アーカイブ</h1>
+        <h1 style="margin:0.35rem 0 0.5rem 0;">Meeting Minutes Notebook</h1>
         <p class="mm-muted" style="margin:0;">
         会議の動画・音声、または文字起こし済みテキスト・SRT から議事録を作成します。
         左のパネルで会議の背景を入力すると、抽出・統合の精度が上がりやすくなります。

@@ -26,7 +26,8 @@ services:
       - MM_OPENAI_ENABLED=${MM_OPENAI_ENABLED:-0}
       # モデル一覧 API 用（worker と同じ Ollama ホストを指定）。api を llm-net に参加させること。
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama-server:11434}
-      # メール完了通知（任意）。設定時は worker と同じ SMTP 変数を渡す。
+      # メール完了通知（任意）。MM_EMAIL_NOTIFY_ENABLED=1 かつ SMTP 設定時のみ UI・送信あり（未設定時はオフ）。
+      # - MM_EMAIL_NOTIFY_ENABLED=1
       # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
       # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
       # - MM_SMTP_FROM=${MM_SMTP_FROM:-}
@@ -75,6 +76,8 @@ services:
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - MM_OPENAI_ENABLED=${MM_OPENAI_ENABLED:-0}
+      # メール通知: MM_EMAIL_NOTIFY_ENABLED=1 と SMTP を api と同様に渡す
+      # - MM_EMAIL_NOTIFY_ENABLED=1
       # - MM_SMTP_HOST=${MM_SMTP_HOST:-}
       # - MM_SMTP_PORT=${MM_SMTP_PORT:-587}
       # - MM_SMTP_FROM=${MM_SMTP_FROM:-}

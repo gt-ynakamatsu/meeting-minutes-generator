@@ -16,6 +16,19 @@ router = APIRouter(tags=["records"])
 logger = logging.getLogger(__name__)
 
 
+def _queue_row_for_api(row) -> dict:
+    """キュー一覧はポーリングで頻繁に取るため、巨大な transcript / summary を載せず ready フラグのみ。"""
+    d = sqlite_row_to_dict(row)
+    t = d.get("transcript")
+    status = str(d.get("status") or "")
+    has_text = bool(t is not None and str(t).strip() != "")
+    # Whisper 実行中は transcript が一瞬だけ入っても無効（完了＝次ステータスへ進んだ後）
+    d["transcript_ready"] = has_text and status != "processing:transcribing"
+    d.pop("transcript", None)
+    d.pop("summary", None)
+    return d
+
+
 @router.get("/api/records")
 def list_records(
     _auth: ApiUser,
@@ -37,7 +50,7 @@ def list_records(
 @router.get("/api/queue")
 def queue_records(_auth: ApiUser):
     rows = db.get_active_queue_records(_auth or "")
-    return [sqlite_row_to_dict(r) for r in rows]
+    return [_queue_row_for_api(r) for r in rows]
 
 
 @router.get("/api/records/{task_id}")
@@ -98,6 +111,38 @@ def export_transcript(task_id: str, _auth: ApiUser):
     return Response(
         content=body,
         media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": content_disposition_attachment(fn)},
+    )
+
+
+@router.get("/api/records/{task_id}/export/transcript_md")
+def export_transcript_md(task_id: str, _auth: ApiUser):
+    """Whisper 後など transcript が埋まっていれば先に取得可能（議事録整形前の生テキスト）。"""
+    row = db.get_record(task_id, _auth or "")
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    text = row["transcript"] or ""
+    st = str(row["status"] or "")
+    if st == "processing:transcribing":
+        raise HTTPException(
+            status_code=404,
+            detail="Whisper による文字起こしがまだ完了していません。しばらくしてから再度お試しください。",
+        )
+    if not str(text).strip():
+        raise HTTPException(status_code=404, detail="文字起こしはまだありません（処理のこの段階では取得できません）")
+    base = os.path.basename(row["filename"] or "transcript")
+    safe_base = base.rsplit(".", 1)[0] if "." in base else base
+    header = (
+        "# 書き起こし（自動・処理途中）\n\n"
+        f"- 元ファイル: {base}\n"
+        "- Whisper 等による自動文字起こしです。議事録の体裁整形・要約より先に保存した内容です。\n\n"
+        "---\n\n"
+    )
+    body = (header + str(text)).encode("utf-8")
+    fn = f"transcript_{safe_base}.md"
+    return Response(
+        content=body,
+        media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": content_disposition_attachment(fn)},
     )
 

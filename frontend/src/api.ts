@@ -61,6 +61,8 @@ export interface RecordRow {
   meeting_date: string | null;
   preset_id: string | null;
   context_json: string | null;
+  /** /api/queue のみ。transcript があり、かつ Whisper 実行中（processing:transcribing）でない */
+  transcript_ready?: boolean;
 }
 
 export interface AuthStatus {
@@ -68,7 +70,9 @@ export interface AuthStatus {
   bootstrap_needed: boolean;
   /** 1人目作成後に自分でアカウント登録できるか（API 未対応時は undefined で表示可） */
   self_register_allowed?: boolean;
-  /** MM_SMTP_* が設定されているとき true（メール通知が選べる） */
+  /** MM_EMAIL_NOTIFY_ENABLED がオンのとき true（メール通知を UI に出す） */
+  email_notify_feature_enabled?: boolean;
+  /** 上記がオンかつ SMTP 設定済みのとき true（メールを送れる） */
   email_notify_available?: boolean;
   /** MM_OPENAI_ENABLED がオフのとき false（未対応 API では undefined = 従来どおり表示） */
   openai_enabled?: boolean;
@@ -305,6 +309,13 @@ export async function getRecord(id: string): Promise<RecordRow> {
   return handle(res);
 }
 
+/** 404 のとき null（ポーリング用。それ以外の HTTP エラーは従来どおり throw） */
+export async function getRecordOrNull(id: string): Promise<RecordRow | null> {
+  const res = await apiFetch(`${PREFIX}/api/records/${encodeURIComponent(id)}`);
+  if (res.status === 404) return null;
+  return handle(res);
+}
+
 export async function patchSummary(id: string, summary: string): Promise<{ ok: boolean }> {
   const res = await apiFetch(`${PREFIX}/api/records/${encodeURIComponent(id)}/summary`, {
     method: "PATCH",
@@ -342,6 +353,17 @@ export async function downloadExportMinutes(recordId: string, filename: string):
 
 export async function downloadExportTranscript(recordId: string, filename: string): Promise<void> {
   const res = await apiFetch(`${PREFIX}/api/records/${encodeURIComponent(recordId)}/export/transcript`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  const blob = await res.blob();
+  triggerBlobDownload(blob, filename);
+}
+
+/** Whisper 後など transcript があるとき先に .md で取得（キュー中でも可） */
+export async function downloadExportTranscriptMd(recordId: string, filename: string): Promise<void> {
+  const res = await apiFetch(`${PREFIX}/api/records/${encodeURIComponent(recordId)}/export/transcript_md`);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || res.statusText);

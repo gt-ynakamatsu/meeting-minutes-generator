@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 import logging
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 def _maybe_send_completion_email(to_addr: str, filename: str, task_id: str) -> None:
     """モジュール先頭で backend を import するとワーカー起動に失敗する環境があるため遅延 import。"""
+    if not feature_flags.email_notify_feature_enabled():
+        return
     try:
         from backend.smtp_notify import send_task_completion_email
     except ImportError as e:
@@ -60,7 +63,7 @@ def _notify_task_failure(
             )
         except Exception:
             pass
-    elif notification_type == "email" and email:
+    elif notification_type == "email" and email and feature_flags.email_notify_feature_enabled():
         try:
             from backend.smtp_notify import send_task_failure_email
         except ImportError as e:
@@ -90,6 +93,21 @@ def _whisper_runtime():
     device = (os.getenv("WHISPER_DEVICE") or "cuda").strip() or "cuda"
     compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or "float16").strip() or "float16"
     return model, device, compute_type
+
+
+def _release_whisper_gpu_resources(device=None):
+    """Whisper（CT2）が掴んだ GPU メモリを早く返す。エラー・破棄後の取りこぼしや CPU 実行時も安全に呼べる。"""
+    dev = (device or os.getenv("WHISPER_DEVICE") or "cuda").strip().lower() or "cuda"
+    gc.collect()
+    if dev != "cuda":
+        return
+    try:
+        if not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("Whisper 後の GPU 解放で例外（無視）", exc_info=True)
 
 
 def load_builtin_presets():
@@ -370,6 +388,7 @@ def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None):
                 os.remove(p)
         except OSError:
             pass
+    _release_whisper_gpu_resources()
 
 
 def _assemble_extract_prompt(base_template, record, preset_extract_hint):
@@ -424,6 +443,7 @@ def process_video_task(
         except OSError:
             pass
         _cleanup_user_prompts(task_id)
+        _release_whisper_gpu_resources()
         return
 
     ollama_model = (llm_config or {}).get("ollama_model") or DEFAULT_OLLAMA_MODEL
@@ -457,6 +477,7 @@ def process_video_task(
                 os.remove(file_path)
         except Exception:
             pass
+        _release_whisper_gpu_resources()
 
     try:
         if is_transcript:
@@ -506,15 +527,20 @@ def process_video_task(
             db.update_record(task_id, owner_username or "", status="processing:transcribing")
             wm, wd, wct = _whisper_runtime()
             logger.info("Whisper: model=%s device=%s compute_type=%s", wm, wd, wct)
-            model = WhisperModel(wm, device=wd, compute_type=wct)
-            raw_segments, _ = model.transcribe(audio_path)
-            segments = normalize_to_segments(list(raw_segments))
-            del model
-            if wd == "cuda":
+            model = None
+            segments = None
+            try:
+                model = WhisperModel(wm, device=wd, compute_type=wct)
+                raw_segments, _ = model.transcribe(audio_path)
+                segments = normalize_to_segments(list(raw_segments))
+            finally:
                 try:
-                    torch.cuda.empty_cache()
+                    if model is not None:
+                        del model
                 except Exception:
                     pass
+                model = None
+                _release_whisper_gpu_resources(wd)
 
             chunks_for_ai, raw_transcript = build_chunks_from_segments(segments)
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
@@ -617,6 +643,7 @@ def process_video_task(
     except Exception as e:
         import traceback
 
+        _release_whisper_gpu_resources()
         traceback.print_exc()
         if _record_cancelled(task_id, owner_username or ""):
             _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
