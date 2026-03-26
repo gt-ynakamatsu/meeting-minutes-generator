@@ -1,4 +1,5 @@
-const PREFIX = import.meta.env.VITE_API_BASE ?? "";
+/** サブパス配信時は /meetingminutesnotebook のように末尾スラッシュなし */
+const PREFIX = String(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
 
 const LS_AUTH = "mm_auth_token";
 

@@ -140,6 +140,21 @@ graph TD
     *   VRAM: 8GB以上推奨 (Whisper Medium + Qwen2.5 7Bの同時稼働のため)
 *   **ドライバ**: NVIDIA Driver, NVIDIA Container Toolkit
 
+### 5.1 GT-2222 公開時の必須設定（HTTPS + サブパス）
+
+- 公開URL: `https://gt-2222/meetingminutesnotebook/`
+- リポジトリ直下 `.env`（`docker-compose.yml` と同階層）に以下を設定する。
+  - `VITE_BASE_PATH=/meetingminutesnotebook/`
+  - `VITE_API_BASE=/meetingminutesnotebook`
+  - `MM_CORS_ORIGINS` に `https://gt-2222`（パスなし）
+- フロントは `docker compose build frontend --no-cache` で再ビルドして反映する。
+- **TLS（社内ルートCAでサーバ証明書を発行する運用）**
+  - ホストNginx: `ssl_certificate` / `ssl_certificate_key` は **`gt-2222.crt`（ルートCA署名）** と **`gt-2222.key`**。古い **`selfsigned.crt`（issuer=subject=gt-2222 等）** のままだと、クライアントに `rootCA.crt` を入れてもブラウザは信頼しない。
+  - サーバで `openssl s_client` により **issuer がルートCA**、**SAN に DNS:gt-2222** であることを確認してからクライアント対応に進む。
+  - **Windows**: 証明書インポートウィザードで **「自動でストアを選択」だけにしない**。**「証明書をすべて次のストアに配置する」→「信頼されたルート証明機関」** を明示。インポート対象は **`rootCA.crt` のみ**（`rootCA.key` は配布しない）。完了後は Edge 完全終了→再アクセス。
+- **ブラウザ通知**: 完了通知を「ブラウザ」で受け取る場合、初回などに **通知の許可** を求めるポップアップが出たら **許可**する。サイト別の通知設定でブロックされていないことも確認する。
+- 詳細な失敗パターンと切り分け手順は `document/gt2222_https_subpath_troubleshooting.md` を参照。
+
 ## 6. 付録：ディレクトリ構成
 *   `frontend/`: React（Vite）SPA。本番ビルドは Nginx 経由で配信。
 *   `backend/main.py`: FastAPI の**組み立てのみ**（CORS・lifespan・`include_router`）。エンドポイント実装は持たない。
@@ -166,4 +181,4 @@ graph TD
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
 ---
-*Last Updated: 2026-03-23（§6 に `backend/routes/` 分割・`ollama_client` / `presets_io` / `http_utils` / `passwords` / `storage` と Streamlit・ワーカーとの共通化を追記）*
+*Last Updated: 2026-03-26（§5.1 に TLS 切り分け・Windows ルート手動ストア指定・ブラウザ通知の許可を追記）*

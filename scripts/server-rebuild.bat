@@ -32,14 +32,33 @@ if "%GLOBAL_BUILDER_PRUNE%"=="1" (
   docker builder prune -f
 )
 
-if "%COMPOSE_BUILD_PULL%"=="1" (
-  echo ==^> docker compose build --pull
-  docker compose build --pull
-  if errorlevel 1 docker-compose build --pull
+if "%COMPOSE_FULL_NO_CACHE%"=="1" (
+  echo ==^> docker compose build --no-cache（全サービス）
+  docker compose build --no-cache
+  if errorlevel 1 docker-compose build --no-cache
+) else if "%SKIP_FRONTEND_NO_CACHE%"=="1" (
+  if "%COMPOSE_BUILD_PULL%"=="1" (
+    echo ==^> docker compose build --pull
+    docker compose build --pull
+    if errorlevel 1 docker-compose build --pull
+  ) else (
+    echo ==^> docker compose build
+    docker compose build
+    if errorlevel 1 docker-compose build
+  )
 ) else (
-  echo ==^> docker compose build
-  docker compose build
-  if errorlevel 1 docker-compose build
+  echo ==^> docker compose build --no-cache frontend
+  docker compose build --no-cache frontend
+  if errorlevel 1 docker-compose build --no-cache frontend
+  if "%COMPOSE_BUILD_PULL%"=="1" (
+    echo ==^> docker compose build --pull api worker
+    docker compose build --pull api worker
+    if errorlevel 1 docker-compose build --pull api worker
+  ) else (
+    echo ==^> docker compose build api worker
+    docker compose build api worker
+    if errorlevel 1 docker-compose build api worker
+  )
 )
 
 echo ==^> docker compose up -d

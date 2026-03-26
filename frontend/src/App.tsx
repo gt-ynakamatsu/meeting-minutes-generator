@@ -54,6 +54,64 @@ function clipForDesktopNotification(text: string, maxLen = 900): string {
   return `${t.slice(0, maxLen)}…`;
 }
 
+function notificationIconUrl(): string | undefined {
+  try {
+    const base = import.meta.env.BASE_URL || "/";
+    return new URL("favicon.svg", `${window.location.origin}${base}`).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** https / localhost / 127.0.0.1 のみ。http://192.168.x.x 等では Edge/Chrome が通知 API を無効化する */
+function isBrowserNotificationSecureContext(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.isSecureContext === true;
+  } catch {
+    return false;
+  }
+}
+
+const VITE_ALT_APP_HOSTNAME = (import.meta.env.VITE_ALT_APP_HOSTNAME as string | undefined)?.trim() ?? "";
+
+/** 単純なホスト名のみ許可（案内用 URL 生成） */
+function sanitizeAltAppHostname(raw: string): string | null {
+  const h = raw.trim().toLowerCase();
+  if (!h || h.length > 253) return null;
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(h)) return null;
+  if (h === "localhost" || h === "127.0.0.1") return null;
+  return raw.trim();
+}
+
+/** ポート・パス・クエリを保ったままホスト差し替え（通知・ブックマーク案内用） */
+function browserNotificationHintUrls(): {
+  current: string;
+  href127: string;
+  hrefLocalhost: string;
+  hrefAlt?: string;
+} | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const current = window.location.href;
+    const u127 = new URL(current);
+    u127.hostname = "127.0.0.1";
+    const uLoc = new URL(current);
+    uLoc.hostname = "localhost";
+    const alt = sanitizeAltAppHostname(VITE_ALT_APP_HOSTNAME);
+    let hrefAlt: string | undefined;
+    if (alt) {
+      const uAlt = new URL(current);
+      uAlt.hostname = alt;
+      const s = uAlt.toString();
+      if (s !== current && s !== u127.toString() && s !== uLoc.toString()) hrefAlt = s;
+    }
+    return { current, href127: u127.toString(), hrefLocalhost: uLoc.toString(), hrefAlt };
+  } catch {
+    return null;
+  }
+}
+
 function getNotificationPermissionSafe(): NotificationPermission {
   try {
     return typeof Notification !== "undefined" ? Notification.permission : "denied";
@@ -1491,8 +1549,15 @@ function AppMain({
   const fileDragDepth = useRef(0);
   const mainFileInputRef = useRef<HTMLInputElement>(null);
   const pendingIdsRef = useRef<string[]>(pendingIds);
-  /** 破棄・pending 追加のたびに増やし、古い tick の setPendingIds を無効化する */
+  /** 破棄・pending 追加のたびに増やし、古い tick の一覧更新を打ち切る */
   const pendingPollRevisionRef = useRef(0);
+  /** ポーリング interval 内で常に最新の通知チャネルを参照する */
+  const notificationRef = useRef(notification);
+  notificationRef.current = notification;
+  /** 完了デスクトップ通知の二重発火防止（並行 tick やリビジョン競合時） */
+  const browserCompletionNotifiedRef = useRef(new Set<string>());
+  /** 完了メッセージ（画面上部）はジョブごとに一度だけ */
+  const completionBannerOnceRef = useRef(new Set<string>());
 
   const onTaskFileDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -1666,6 +1731,8 @@ function AppMain({
       if (idsSnapshot.length === 0) return;
       const revAtStart = pendingPollRevisionRef.current;
       const stillActive = new Set<string>();
+      const notifyBrowser = notificationRef.current === "browser";
+      const notifIcon = notificationIconUrl();
       for (const id of idsSnapshot) {
         let r: RecordRow | null;
         try {
@@ -1685,13 +1752,28 @@ function AppMain({
         if (stNorm === "completed") {
           errorNotifiedRef.current.delete(id);
           const label = r.filename || id;
-          // タブを前面に開いていると Chrome/Edge などは同じサイトのデスクトップ通知を出さないことが多い（Teams など別アプリとは無関係）
-          setMsg(`議事録が完成しました: ${label}`);
-          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+          const wantBrowser = notifyBrowser && typeof Notification !== "undefined";
+          const perm = wantBrowser ? Notification.permission : "denied";
+          const secureCtx = isBrowserNotificationSecureContext();
+
+          if (!completionBannerOnceRef.current.has(id)) {
+            completionBannerOnceRef.current.add(id);
+            setMsg(`議事録が完成しました: ${label}`);
+          }
+
+          // 許可がまだ default のときは pending に残し、許可後の tick でデスクトップ通知する（Secure Context のみ）
+          if (wantBrowser && perm === "default" && secureCtx) {
+            stillActive.add(id);
+            continue;
+          }
+
+          if (wantBrowser && secureCtx && perm === "granted" && !browserCompletionNotifiedRef.current.has(id)) {
+            browserCompletionNotifiedRef.current.add(id);
             try {
               new Notification("議事録ができました", {
                 body: label,
                 tag: `mm-done-${id}`,
+                icon: notifIcon,
                 silent: false,
               });
             } catch (e) {
@@ -1704,9 +1786,15 @@ function AppMain({
           if (!errorNotifiedRef.current.has(id)) {
             errorNotifiedRef.current.add(id);
             const errBody = st.replace(/^Error:\s*/i, "").trim();
-            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            if (
+              notifyBrowser &&
+              isBrowserNotificationSecureContext() &&
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted"
+            ) {
               new Notification("議事録処理でエラーが発生しました（ジョブを破棄します）", {
                 body: clipForDesktopNotification(errBody || r.filename || ""),
+                icon: notifIcon,
               });
             } else {
               setMsg(`議事録処理でエラーが発生しました（破棄処理中）: ${errBody || r.filename || ""}`);
@@ -1725,9 +1813,15 @@ function AppMain({
             if (!errorNotifiedRef.current.has(id)) {
               errorNotifiedRef.current.add(id);
               const body = taskErrorDetailFromSummary(sum);
-              if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+              if (
+                notifyBrowser &&
+                isBrowserNotificationSecureContext() &&
+                typeof Notification !== "undefined" &&
+                Notification.permission === "granted"
+              ) {
                 new Notification("議事録処理でエラーが発生しました（ジョブは破棄されました）", {
                   body: clipForDesktopNotification(body || r.filename || ""),
+                  icon: notifIcon,
                 });
               } else {
                 setMsg(`議事録処理でエラー（破棄済み）: ${body || r.filename || ""}`);
@@ -1739,9 +1833,8 @@ function AppMain({
         }
         stillActive.add(id);
       }
-      if (revAtStart !== pendingPollRevisionRef.current) return;
+      // リビジョンが変わっても必ず適用する（完了 ID が pending から外れないよう）
       setPendingIds((prev) => {
-        if (revAtStart !== pendingPollRevisionRef.current) return prev;
         const out: string[] = [];
         for (const id of prev) {
           if (idsSnapshot.includes(id)) {
@@ -1752,6 +1845,7 @@ function AppMain({
         }
         return out;
       });
+      if (revAtStart !== pendingPollRevisionRef.current) return;
       try {
         await refreshRecords();
         await refreshQueue();
@@ -1852,18 +1946,40 @@ function AppMain({
     fd.append("file", file);
     if (promptExtract) fd.append("prompt_extract", promptExtract);
     if (promptMerge) fd.append("prompt_merge", promptMerge);
+    // 許可ダイアログは「ユーザー操作の直後」に開始しないと無視されるブラウザがあるため、await より前で呼ぶ
+    let notifPermPromise: Promise<NotificationPermission> | null = null;
+    if (
+      notification === "browser" &&
+      typeof Notification !== "undefined" &&
+      isBrowserNotificationSecureContext() &&
+      Notification.permission === "default"
+    ) {
+      try {
+        notifPermPromise = Notification.requestPermission();
+      } catch {
+        notifPermPromise = Promise.resolve(Notification.permission);
+      }
+    }
     try {
       const res = await createTask(fd);
-      if (notification === "browser") {
-        pendingPollRevisionRef.current += 1;
-        setPendingIds((p) => [...p, res.task_id]);
-        void onRequestNotifPermission();
+      pendingPollRevisionRef.current += 1;
+      setPendingIds((p) => [...p, res.task_id]);
+      if (notifPermPromise) {
+        try {
+          const p = await notifPermPromise;
+          setNotifPermission(p);
+        } catch {
+          setNotifPermission(getNotificationPermissionSafe());
+        }
       }
       setMsg("受け付けました。処理が始まるまで少しお待ちください。");
       setFile(null);
       const fin = mainFileInputRef.current;
       if (fin) fin.value = "";
     } catch (ex) {
+      if (notifPermPromise) {
+        void notifPermPromise.finally(() => setNotifPermission(getNotificationPermissionSafe()));
+      }
       setErr(String(ex));
     }
   };
@@ -2062,6 +2178,72 @@ function AppMain({
             <div className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0", lineHeight: 1.5 }}>
               {typeof Notification === "undefined" ? (
                 <span>この環境はデスクトップ通知に未対応です。画面上部のメッセージと一覧で完了を確認してください。</span>
+              ) : !isBrowserNotificationSecureContext() ? (
+                (() => {
+                  const lb = browserNotificationHintUrls();
+                  return (
+                    <span>
+                      <strong>このアドレスでは Edge のデスクトップ通知は使えません。</strong>
+                      <code>http://</code> の IP や社内ホスト名は「安全なページ」にならず、通知 API が無効になることがあります。
+                      <br />
+                      <span style={{ display: "block", marginTop: "0.35rem" }}>
+                        現在:{" "}
+                        {lb ? (
+                          <code style={{ wordBreak: "break-all" }}>{lb.current}</code>
+                        ) : (
+                          <code style={{ wordBreak: "break-all" }}>{typeof window !== "undefined" ? window.location.href : ""}</code>
+                        )}
+                      </span>
+                      <span style={{ display: "block", marginTop: "0.55rem" }}>
+                        <strong>サーバ（Docker 等）に載せて、別 PC のブラウザから開いている場合</strong>
+                        （いちばん多い運用）:
+                        <br />
+                        ・<strong>デスクトップ通知まで欲しい</strong> → 手前に <strong>HTTPS</strong> を立てるのが確実です（Nginx / Caddy / クラウドのロードバランサなどで TLS
+                        終端し、<code>https://議事録.example.com</code> のように公開）。{"Let's Encrypt "}
+                        や社内 CA の証明書を使います。
+                        <br />
+                        ・HTTP のままにする → 通知は <strong>Webhook・メール</strong> に切り替えるか、<strong>画面上部のメッセージと一覧</strong>だけで完了を確認してください（自動更新は動きます）。
+                      </span>
+                      <span style={{ display: "block", marginTop: "0.55rem" }}>
+                        <strong>アプリを動かしている PC と同じマシン</strong>でブラウザを開いているだけのとき（例: その PC 上の Docker が{" "}
+                        <code>172.29.x.x:8085</code> を公開）: 下の <code>127.0.0.1</code> / <code>localhost</code> は
+                        <strong>その PC 上の同じポート</strong>を指します。
+                        <span className="muted" style={{ display: "block", fontSize: "0.9em", marginTop: "0.2rem" }}>
+                          別 PC からサーバに繋いでいる場合、<code>127.0.0.1</code> のリンクは<strong>あなたの PC 側</strong>になり、通常はこのアプリには届きません。
+                        </span>
+                      </span>
+                      {lb ? (
+                        <>
+                          <span style={{ display: "block", marginTop: "0.35rem" }}>
+                            <strong>同一 PC で試す URL</strong>（ポート・パスは現在と同じ）:
+                          </span>
+                          <ul style={{ margin: "0.35rem 0 0", paddingLeft: "1.2rem", lineHeight: 1.6 }}>
+                            <li style={{ wordBreak: "break-all" }}>
+                              <a href={lb.href127} style={{ color: "var(--accent)" }}>
+                                {lb.href127}
+                              </a>
+                            </li>
+                            <li style={{ wordBreak: "break-all" }}>
+                              <a href={lb.hrefLocalhost} style={{ color: "var(--accent)" }}>
+                                {lb.hrefLocalhost}
+                              </a>
+                            </li>
+                            {lb.hrefAlt ? (
+                              <li style={{ wordBreak: "break-all" }}>
+                                <a href={lb.hrefAlt} style={{ color: "var(--accent)" }}>
+                                  {lb.hrefAlt}
+                                </a>
+                                <span className="muted" style={{ display: "block", fontSize: "0.9em", marginTop: "0.15rem" }}>
+                                  （社内 DNS / hosts で名前解決できる場合。<code>http</code> のままでは通知は有効になりません）
+                                </span>
+                              </li>
+                            ) : null}
+                          </ul>
+                        </>
+                      ) : null}
+                    </span>
+                  );
+                })()
               ) : notifPermission === "denied" ? (
                 <span>
                   ブラウザが通知を<strong>ブロック</strong>しています。アドレスバーの鍵／サイト設定から通知を許可するか、完了は一覧で確認してください。
@@ -2072,7 +2254,7 @@ function AppMain({
                   <button type="button" className="btn-secondary" style={{ width: "auto", marginTop: 0 }} onClick={() => void onRequestNotifPermission()}>
                     通知を許可
                   </button>
-                  <span className="muted">（投入ボタン押下時にも許可ダイアログを出します）</span>
+                  <span className="muted">（「解析をキューに追加」押下の直後、アップロード前に許可を求めます）</span>
                 </span>
               ) : (
                 <span>

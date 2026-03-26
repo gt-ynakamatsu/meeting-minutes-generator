@@ -20,6 +20,11 @@
 # 解凍後にリモートのアーカイブを削除: TAR_SCP_RM_REMOTE=1 ./scripts/tar-scp.sh
 # 転送のみ（解凍しない）: TAR_SCP_SKIP_EXTRACT=1 ./scripts/tar-scp.sh
 #
+# docker compose が読む .env は .gitignore のため tar に含まれないことが多い。
+# 解凍後にリモートで GT-2222 用テンプレを .env にする:
+#   TAR_SCP_SET_ENV=gt2222 ./scripts/tar-scp.sh
+# （既存のリモート .env は上書きされる。ローカルに .env があり tar に含まれる場合も最後に上書き）
+#
 # 解凍は上書きマージのみ。ローカルで消したパスはリモートに残ることがあります（rsync --delete 相当ではない）。
 #
 
@@ -89,6 +94,12 @@ fi
 echo "==> ${REMOTE}: リモートディレクトリ作成"
 "${SSH_BIN}" "${REMOTE}" "${_REMOTE_MKDIR}"
 
+if [[ ! -f "${ROOT}/.env" ]]; then
+  echo "==> 注意: ローカルに .env がありません（gitignore のため tar にも含まれません）。" >&2
+  echo "    サーバで VITE_* が空のまま frontend がビルドされます。対策: ローカルで .env を作るか、" >&2
+  echo "    TAR_SCP_SET_ENV=gt2222 を付けて解凍後に config/gt-2222.env を .env にコピーしてください。" >&2
+fi
+
 echo "==> tar czf ${LOCAL_TAR} (excludes: .git data node_modules …)"
 tar czf "${LOCAL_TAR}" -C "${ROOT}" "${TAR_EXCLUDES[@]}" .
 
@@ -102,6 +113,11 @@ if [[ -z "${TAR_SCP_SKIP_EXTRACT:-}" ]]; then
   fi
   echo "==> ${REMOTE}: 解凍 ${ARCHIVE_BASENAME}"
   "${SSH_BIN}" "${REMOTE}" "${_EXTRACT}"
+  if [[ "${TAR_SCP_SET_ENV:-}" == "gt2222" ]]; then
+    echo "==> ${REMOTE}: .env ← config/gt-2222.env（TAR_SCP_SET_ENV=gt2222）"
+    _ENV_CMD="${_REMOTE_CD} && if [ -f config/gt-2222.env ]; then cp -f config/gt-2222.env .env; else echo 'error: config/gt-2222.env がありません' >&2; exit 1; fi"
+    "${SSH_BIN}" "${REMOTE}" "${_ENV_CMD}"
+  fi
 else
   echo "==> 解凍スキップ（TAR_SCP_SKIP_EXTRACT=1）"
 fi

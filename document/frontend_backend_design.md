@@ -154,7 +154,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 ## 6. フロントエンド設計
 
 - **技術**: React 18、Vite 5、TypeScript、`react-markdown`（JSON でない要約の表示用）。
-- **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。
+- **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。**通知を使うユーザーは、ブラウザが出す通知許可のポップアップ／バナーで「許可」する**（ブロックのままでは通知が届かない）。
 - **ジョブ破棄**: キュー表示などから **`POST /api/records/{task_id}/discard`**（`discardRecord`）を呼び、待機・処理中タスクを取消・ファイル掃除。
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
@@ -259,6 +259,25 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - ローカル開発: リポジトリ直下 `.env` の `VITE_DEV_API_PROXY`（Vite が `/api` を転送する先）
 - **既定値**（例: API の CORS に `localhost:5173`、Celery の `redis://localhost:6379/0`、ワーカーの `OLLAMA_BASE_URL=http://ollama-server:11434`）は **開発・Compose 向けのデフォルト**（`llm-net` 上の Ollama コンテナ名想定）であり、本番では `.env` やオーケストレーション側で上書きすること。
 
+### 11.1 GT-2222 HTTPS サブパス公開の確定運用
+
+- 公開 URL は **`https://gt-2222/meetingminutesnotebook/`**（末尾スラッシュ推奨）。
+- Compose の `.env`（`docker-compose.yml` と同階層）に以下を必ず設定する。
+  - `VITE_BASE_PATH=/meetingminutesnotebook/`
+  - `VITE_API_BASE=/meetingminutesnotebook`
+  - `MM_CORS_ORIGINS` に `https://gt-2222` を含める（パスは書かない）。
+- フロント配信 Nginx（`frontend/nginx.conf`）はサブパスを受けた際にプレフィックスを剥がして `/index.html`・`/assets` に解決する（`/meetingminutesnotebook/index.html` を直接探しに行かない）。
+- デプロイスクリプト運用では次を既定とする。
+  - `scripts/server-rebuild.sh` / `.bat`: `frontend` を `--no-cache` ビルド
+  - `scripts/tar-scp.sh`: `TAR_SCP_SET_ENV=gt2222` で `config/gt-2222.env` を `.env` として配置可能
+- **TLS（社内ルートCA + サーバ証明書）**
+  - ホストNginxの `ssl_certificate` / `ssl_certificate_key` には **`gt-2222.crt`（CA署名）** と **`gt-2222.key`** を指定する（`rootCA.crt` はクライアント配布用。Nginx のサーバ証明書には使わない）
+  - 同一 `server { listen 443 ssl; server_name GT-2222; }` 内の **全 `location`（例: `/jupyter/`）** は同じ証明書を共有する（`location` 単位で証明書は変えられない）
+  - サーバ側確認: `openssl s_client` で **issuer がルートCA**、**SAN に `DNS:gt-2222`** であること
+  - Windowsクライアント: **`rootCA.crt` を「信頼されたルート証明機関」に手動ストア指定**でインポート（ウィザードの「自動選択ストア」だけだと未信頼のままになりやすい）
+  - **ブラウザ通知**利用時: 通知許可のポップアップ／バナーが出たら **許可**する（ブロックのままでは完了通知が届かない）
+- 詳細な試行錯誤・切り分け手順は `document/gt2222_https_subpath_troubleshooting.md` を参照。
+
 ---
 
 ## 12. 変更履歴（ドキュメント）
@@ -273,3 +292,6 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.5 | 2026-03-23 | ログイン ID をメールに合わせ §5 認証 API を更新。**§7.1〜7.4** に設定・秘密のコード所在と外部流出防止を明記 |
 | 1.6 | 2026-03-23 | **`GET /api/ollama/models`**、**`GET/PATCH /api/me/llm`**、**`POST .../discard`**。**`AuthStatus`** の **`email_notify_available` / `openai_enabled`**。**`MM_OPENAI_ENABLED`**・**`feature_flags.py`**・api の **`llm-net` / `OLLAMA_BASE_URL`**。§5.1 の通知・OpenAI 分岐。§6 の Ollama コンボボックス・OpenAI オフ UI。論理構成図に API→Ollama（tags） |
 | 1.7 | 2026-03-23 | **`§4.3`** に `backend/` パッケージ・ルーター対応表を追加。**§7.1** の Ollama／プリセット／http_utils／passwords の所在を **`main.py` 単体記述から更新**。**§8** に Streamlit と `presets_io` / `storage` の共有を追記。**§2** 冒頭の API 説明は維持 |
+| 1.8 | 2026-03-26 | **`§11.1`** に GT-2222 HTTPS サブパス公開の確定運用（`VITE_BASE_PATH`、`VITE_API_BASE`、`MM_CORS_ORIGINS`、frontend Nginx のプレフィックス剥がし、デプロイスクリプト運用）を追記 |
+| 1.9 | 2026-03-26 | **`§11.1`** に TLS 運用（`gt-2222.crt`/`gt-2222.key`、`rootCA.crt` のクライアント手動ルート、同一443 `server` での証明書共有）を追記。`gt2222_https_subpath_troubleshooting.md` の証明書切り分けを拡充 |
+| 1.10 | 2026-03-26 | **§6・§11.1** と `gt2222_https_subpath_troubleshooting.md` にブラウザ通知の許可ポップアップ運用を追記 |

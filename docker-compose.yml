@@ -48,6 +48,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_ALT_APP_HOSTNAME: ${VITE_ALT_APP_HOSTNAME:-}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+        VITE_API_BASE: ${VITE_API_BASE:-}
     container_name: mm-frontend
     ports:
       - "${MM_FRONTEND_PORT:-8085}:80"

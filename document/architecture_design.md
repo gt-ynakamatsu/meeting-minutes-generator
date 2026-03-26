@@ -148,6 +148,22 @@ SQLite3 (`data/minutes.db`) を使用。
     *   Worker → Ollama: **`OLLAMA_BASE_URL`**（推論は **`/api/generate`** 等。Compose 既定は **`http://ollama-server:11434`**。コンテナ名・URL が違えば `.env` で指定）
 *   **機能フラグ**: リポジトリ直下の **`feature_flags.py`** が **`MM_OPENAI_ENABLED`** を解釈し、API・Celery・Streamlit で共通利用する。
 
+### 5.1 HTTPS + サブパス公開（GT-2222 運用）
+
+- 外部公開はホスト Nginx で TLS 終端し、`/meetingminutesnotebook/` を `http://127.0.0.1:8085/meetingminutesnotebook/` にリバースプロキシする。
+- Compose の `.env` は以下を必須とする。
+  - `VITE_BASE_PATH=/meetingminutesnotebook/`
+  - `VITE_API_BASE=/meetingminutesnotebook`
+  - `MM_CORS_ORIGINS` に `https://gt-2222`
+- フロントコンテナ Nginx はサブパス受信時にプレフィックスを剥がして静的配信へ解決する（rewrite + `/index.html` fallback）。
+- **ホスト443の証明書**: `ssl_certificate` / `ssl_certificate_key` には **ルートCAで署名した `gt-2222.crt` / `gt-2222.key`** を指定する。`issuer=subject=gt-2222` の単体自己署名を出し続けると、クライアントに配った `rootCA.crt` と鎖がつながらない。
+- **同一 `server { listen 443 ssl; server_name GT-2222; }`** では、`/jupyter/` 等の他 `location` も **同じサーバ証明書**を使う（TLS は `server` 単位）。
+- 代表ヘルス確認:
+  - `curl -sI http://127.0.0.1:8085/meetingminutesnotebook/`
+  - `curl -skI --resolve gt-2222:443:127.0.0.1 https://gt-2222/meetingminutesnotebook/`
+  - `openssl s_client` で提示証明書の **issuer（ルートCA）** と **SAN（DNS:gt-2222）** を確認
+- 運用時の詳細トラブルシュートは `document/gt2222_https_subpath_troubleshooting.md` を参照。
+
 ## 6. セキュリティと制約事項
 
 *   **認証**: 環境変数 `MM_AUTH_SECRET` 設定時に **JWT（Bearer）＋ registry DB** によるログインを有効化。`data/registry.db` の `users` テーブルにパスワードハッシュ（bcrypt）と `is_admin` を保持。ログイン ID は **メールアドレス**（DB 主キー列名は `username`）。ユーザーが 0 件の初回のみ、ブラウザの **初回セットアップ**（または `MM_BOOTSTRAP_ADMIN_*`）で最初の管理者を登録可能。管理者は **設定ドロワーの「ユーザー・権限」タブ**から追加ユーザー・パスワード再設定・管理者権限の付与・解除が可能。議事録本体はユーザー別に `data/user_data/<slug>/minutes.db`（従来は `data/minutes.db`）。
@@ -156,4 +172,4 @@ SQLite3 (`data/minutes.db`) を使用。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
 
 ---
-*Last Updated: 2026-03-23（§2.2 に API モジュール分割、§6 に CORS／ルートの所在を追記）*
+*Last Updated: 2026-03-26（§5.1 に TLS 証明書の切り分け・同一443 server での証明書共有を追記）*

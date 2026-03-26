@@ -14,6 +14,8 @@
 # 環境変数:
 #   SKIP_RMI_LOCAL=1           … down 時の --rmi local を付けない（古いビルドイメージを残す）
 #   COMPOSE_BUILD_PULL=1       … build 時に --pull
+#   COMPOSE_FULL_NO_CACHE=1    … build を全サービス --no-cache（遅い。通常は不要）
+#   SKIP_FRONTEND_NO_CACHE=1   … frontend の --no-cache を省略（既定では frontend だけ no-cache）
 #   GLOBAL_IMAGE_PRUNE=1       … 非推奨: ホスト全体の dangling 削除（docker image prune -f）
 #   GLOBAL_BUILDER_PRUNE=1     … 非推奨: ホスト全体のビルドキャッシュ削除（docker builder prune -f）
 #
@@ -65,8 +67,18 @@ if [[ "${COMPOSE_BUILD_PULL:-}" == "1" ]]; then
   BUILD_ARGS+=(--pull)
 fi
 
-echo "==> docker compose build"
-"${COMPOSE[@]}" build "${BUILD_ARGS[@]}"
+if [[ "${COMPOSE_FULL_NO_CACHE:-}" == "1" ]]; then
+  echo "==> docker compose build --no-cache（全サービス・COMPOSE_FULL_NO_CACHE=1）"
+  "${COMPOSE[@]}" build --no-cache "${BUILD_ARGS[@]}"
+elif [[ "${SKIP_FRONTEND_NO_CACHE:-}" == "1" ]]; then
+  echo "==> docker compose build（SKIP_FRONTEND_NO_CACHE=1）"
+  "${COMPOSE[@]}" build "${BUILD_ARGS[@]}"
+else
+  echo "==> docker compose build --no-cache frontend（.env の VITE_* を確実に反映）"
+  "${COMPOSE[@]}" build --no-cache "${BUILD_ARGS[@]}" frontend
+  echo "==> docker compose build api worker"
+  "${COMPOSE[@]}" build "${BUILD_ARGS[@]}" api worker
+fi
 
 echo "==> docker compose up -d"
 "${COMPOSE[@]}" up -d
