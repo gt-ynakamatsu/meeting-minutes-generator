@@ -23,7 +23,7 @@ MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 # パラメータ設定 (選べるように変数化)
 TEMPERATURE = 0
-NUM_CTX = 8192  # 4096 or 8192 (長い会議の場合は8192推奨)
+NUM_CTX = 4096  # 8192 は VRAM/CPU オフロード負荷が大きい。必要なら上げる
 REQ_TIMEOUT = 600
 
 def main():

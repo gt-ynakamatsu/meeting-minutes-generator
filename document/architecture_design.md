@@ -145,7 +145,7 @@ SQLite3 (`data/minutes.db`) を使用。
     *   API → Redis: `redis:6379`
     *   Worker → Redis: `redis:6379`
     *   API → Ollama: **`OLLAMA_BASE_URL`** の **`GET /api/tags`**（タグ名一覧。UI のモデル候補用。ブラウザは Ollama に直結しない）
-    *   Worker → Ollama: **`OLLAMA_BASE_URL`**（推論は **`/api/generate`** 等。Compose 既定は **`http://ollama-server:11434`**。コンテナ名・URL が違えば `.env` で指定）
+    *   Worker → Ollama: **`OLLAMA_BASE_URL`**（推論は **`POST /api/generate`** 等。Compose 既定は **`http://ollama-server:11434`**。コンテナ名・URL が違えば `.env` で指定）。リクエスト **`options.num_ctx`** は **`tasks.py` の `call_llm` で 4096**（VRAM／KV 負荷抑制。HTTP タイムアウト 600 秒）
 *   **機能フラグ**: リポジトリ直下の **`feature_flags.py`** が **`MM_OPENAI_ENABLED`** を解釈し、API・Celery・Streamlit で共通利用する。
 
 ### 5.1 HTTPS + サブパス公開（GT-2222 運用）
@@ -172,4 +172,4 @@ SQLite3 (`data/minutes.db`) を使用。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
 
 ---
-*Last Updated: 2026-03-26（§5.1 に TLS 証明書の切り分け・同一443 server での証明書共有を追記）*
+*Last Updated: 2026-03-27（§5 Worker→Ollama に `num_ctx` 4096・タイムアウト 600 秒を追記）*

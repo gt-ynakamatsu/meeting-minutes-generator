@@ -144,6 +144,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - **認証有効**かつ OpenAI: フォームのキーではなく **registry に保存された API キー**を使用。未保存なら 400
   - **認証オフ**かつ OpenAI: 従来どおりリクエストの **`openai_api_key`** 必須
 - Ollama: **`ollama_model`** 文字列（ワーカーが `OLLAMA_BASE_URL` へ接続するときのモデル名）
+- **Ollama 推論オプション（クライアント `metadata` では指定しない）**: ワーカー `tasks.py` の `call_llm` が `POST /api/generate` に渡す **`options`** として **`num_ctx: 4096`**（コンテキスト長。VRAM・KV キャッシュ負荷と CPU オフロードを抑えるため。長い会議では入力切り詰めが増える可能性あり。必要に応じコードで 6144／8192 等へ変更）、**HTTP タイムアウト 600 秒**を用いる。
 - 会議メタ: `topic`, `meeting_date`, `category`, `tags`, `preset_id`
 - 精度用: `context` … `purpose`, `participants`, `glossary`, `tone`, `action_rules`
 
@@ -182,6 +183,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 議事録保持日数などその他 | `database.py` 等（例: `MM_MINUTES_RETENTION_DAYS`） | サーバ環境変数。 |
 | OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
 | API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
+| Ollama 推論（`num_ctx`・タイムアウト） | **`tasks.py`** の **`call_llm`**（`POST /api/generate`、`options.num_ctx` は **4096**、`requests` タイムアウト **600** 秒） | UI・`POST /api/tasks` の `metadata` からは変更不可。CLI は **`pipeline/02_extract.py`**（`num_ctx` **4096**）、**`03_merge.py`**（**`NUM_CTX`** **4096**）をワーカーと揃える。 |
 | プリセット JSON の単一ソース | **`backend/presets_io.py`** | **`routes/presets.py`**・**`tasks.py`**・**Streamlit `app.py`** が同じ読み込み経路を使う。 |
 | エクスポートヘッダ・行 dict 化 | **`backend/http_utils.py`** | **`routes/records.py`** で利用。 |
 | ログイン時パスワード検証 | **`backend/passwords.py`** | **`routes/auth.py`** で利用。 |
@@ -262,7 +264,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - API・ワーカー: **`OLLAMA_BASE_URL`**（API は **`/api/tags`**、ワーカーは推論）、**`MM_OPENAI_ENABLED`**
   - ワーカー: `CELERY_BROKER_URL`、`WEBHOOK_URL`
   - メール通知: **`MM_SMTP_*`**（API とワーカーで同一値を推奨）
-  - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（`pipeline/02_extract.py`、`03_merge.py`）
+  - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（`pipeline/02_extract.py`、`03_merge.py`）。Ollama の **`num_ctx`** は **`02_extract` / `03_merge` 内の定数**（いずれも **4096**。ワーカー `tasks.py` の `call_llm` と整合）
   - ローカル開発: リポジトリ直下 `.env` の `VITE_DEV_API_PROXY`（Vite が `/api` を転送する先）
 - **既定値**（例: API の CORS に `localhost:5173`、Celery の `redis://localhost:6379/0`、ワーカーの `OLLAMA_BASE_URL=http://ollama-server:11434`）は **開発・Compose 向けのデフォルト**（`llm-net` 上の Ollama コンテナ名想定）であり、本番では `.env` やオーケストレーション側で上書きすること。
 
@@ -306,3 +308,4 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.12 | 2026-03-27 | **§6** Ollama モデル候補は初回マウント・認証更新時のみ取得（ページ再読み込みで更新。フォーカス等での再取得なし） |
 | 1.13 | 2026-03-27 | **`GET /api/ollama/models`** を**認証不要**に変更（認証 ON かつ未ログインで 401→一覧空になっていた問題の修正）。**§5** の応答説明を更新。**`ollama_client`** で tags の **`model`** キーにもフォールバック |
 | 1.14 | 2026-03-27 | **§6** Ollama モデル UI を**コンボボックスから `<select>` のみ**に変更（手入力不可） |
+| 1.15 | 2026-03-27 | **§5.1**・**§7.1**・**§11** に Ollama **`num_ctx: 4096`**（ワーカー `call_llm`）・**600 秒タイムアウト**、CLI **`pipeline/02_extract.py` / `03_merge.py`** との整合を追記（VRAM／KV 負荷・CPU オフロード抑制のため `8192` から変更） |

@@ -18,6 +18,47 @@ def ollama_generate_url() -> str:
     return f"{ollama_base_url()}/api/generate"
 
 
+def try_ollama_unload_model(model_name: str, timeout_sec: float = 60.0) -> None:
+    """Ollama にモデルを即時アンロードさせる（VRAM 解放）。失敗しても例外は出さない。"""
+    if (os.getenv("OLLAMA_UNLOAD_ON_TASK_END") or "1").strip().lower() in ("0", "false", "no"):
+        return
+    name = (model_name or "").strip()
+    if not name:
+        return
+    url = ollama_generate_url()
+    body = json.dumps(
+        {"model": name, "prompt": "", "keep_alive": 0, "stream": False},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        logger.warning(
+            "Ollama アンロード要求が HTTP エラー (%s): %s %s",
+            name,
+            e.code,
+            ollama_base_url(),
+        )
+    except urllib.error.URLError as e:
+        logger.warning(
+            "Ollama アンロード要求に接続できません (%s, %s): %s",
+            name,
+            ollama_base_url(),
+            e.reason if hasattr(e, "reason") else e,
+        )
+    except (TimeoutError, OSError) as e:
+        logger.warning("Ollama アンロード要求がタイムアウトまたは I/O エラー (%s): %s", name, e)
+    except Exception as e:
+        logger.warning("Ollama アンロード要求で予期しないエラー (%s): %s", name, e)
+
+
 def fetch_ollama_model_names(timeout_sec: float = 6.0) -> List[str]:
     base = ollama_base_url()
     url = f"{base}/api/tags"

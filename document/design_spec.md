@@ -80,6 +80,12 @@ graph TD
 6.  **統合 (Reduce)**: 全チャンクの抽出結果をマージし、再度LLMを実行して重複排除・文章の整形で最終的なMarkdown議事録を生成。
 7.  **完了・通知**: データベースを更新し、Webhookまたはブラウザ経由でユーザーに完了を通知。
 
+#### 3.1.1 Ollama 呼び出しパラメータ（ワーカー・CLI）
+
+- **Celery ワーカー**（`tasks.py` の `call_llm`）は、Ollama **`POST /api/generate`** に **`options.num_ctx: 4096`** を付与する。VRAM・KV キャッシュ負荷を抑え、GPU メモリが限られる環境での **CPU オフロード過多**を緩和するため（以前は **8192**。長会議ではプロンプト切り詰めが増える可能性があり、品質・失敗時はコード上で **6144**／**8192** 等の見直しを検討）。
+- 同一呼び出しの **HTTP タイムアウトは 600 秒**。
+- **CLI パイプライン**（ホスト直実行）: `pipeline/02_extract.py` はリクエストに **`num_ctx: 4096`**、`03_merge.py` は **`NUM_CTX = 4096`** とし、ワーカーと揃える。
+
 ### 3.2 データベース設計 (簡易スキーマ)
 
 **Tasks Table**
@@ -174,11 +180,11 @@ graph TD
 *   `backend/storage.py`: ユーザープロンプト一時ファイル保存（**API** と **Streamlit** が同じ関数を利用可能）
 *   `feature_flags.py`: **`MM_OPENAI_ENABLED`** 等の機能 ON/OFF（API・ワーカー・`app.py` で共通化）
 *   `app.py`: Streamlit（レガシー UI。プリセット・プロンプト保存は **`backend.presets_io`** / **`backend.storage`** で API と整合）
-*   `tasks.py`: Celery ワーカー／パイプライン実装（**`backend.ollama_client`**・**`backend.presets_io`** を参照して URL／プリセットを API と整合）
+*   `tasks.py`: Celery ワーカー／パイプライン実装（**`backend.ollama_client`**・**`backend.presets_io`** を参照して URL／プリセットを API と整合）。Ollama 経路は **`call_llm` 内で `num_ctx: 4096`** 等を固定（§3.1.1）
 *   `celery_app.py`: Celery アプリ定義（API はここだけ import して `send_task`）
 *   `database.py`: DB 操作ラッパー（認証時は `registry.db`・ユーザー別 `minutes.db`）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
 ---
-*Last Updated: 2026-03-26（§5.1 に TLS 切り分け・Windows ルート手動ストア指定・ブラウザ通知の許可を追記）*
+*Last Updated: 2026-03-27（§3.1.1 Ollama `num_ctx` 4096・タイムアウト、`tasks.py`／`pipeline` 整合を追記）*

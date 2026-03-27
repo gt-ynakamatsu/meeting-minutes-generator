@@ -16,7 +16,7 @@ from faster_whisper import WhisperModel
 import torch
 import database as db
 import feature_flags
-from backend.ollama_client import ollama_generate_url
+from backend.ollama_client import ollama_generate_url, try_ollama_unload_model
 from backend.presets_io import load_presets_dict
 from moviepy.editor import AudioFileClip, VideoFileClip
 import uuid
@@ -349,7 +349,7 @@ def call_llm(prompt, config, temperature=0.0, json_mode=False):
                     "prompt": prompt,
                     "format": "json" if json_mode else None,
                     "stream": False,
-                    "options": {"temperature": temperature, "num_ctx": 8192},
+                    "options": {"temperature": temperature, "num_ctx": 4096},
                 },
                 timeout=600,
             )
@@ -378,7 +378,16 @@ def _record_cancelled(task_id: str, owner: str) -> bool:
     return (row["status"] or "").strip() == "cancelled"
 
 
-def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None):
+def _try_ollama_unload_for_config(llm_config, ollama_model_name: str) -> None:
+    """エラー・破棄後に Ollama の VRAM を早く返す。OpenAI 利用時は何もしない。"""
+    cfg = llm_config if isinstance(llm_config, dict) else {}
+    if cfg.get("provider", "ollama") == "openai":
+        return
+    model = (cfg.get("ollama_model") or ollama_model_name or "").strip() or DEFAULT_OLLAMA_MODEL
+    try_ollama_unload_model(model)
+
+
+def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None, llm_config=None, ollama_model=None):
     _cleanup_user_prompts(task_id)
     for p in (file_path, audio_path):
         try:
@@ -387,6 +396,7 @@ def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None):
         except OSError:
             pass
     _release_whisper_gpu_resources()
+    _try_ollama_unload_for_config(llm_config, ollama_model or "")
 
 
 def _assemble_prompt_with_context(base_template, record, preset_hint, hint_heading):
@@ -423,6 +433,8 @@ def process_video_task(
     if not record:
         return
 
+    ollama_model = (llm_config or {}).get("ollama_model") or DEFAULT_OLLAMA_MODEL
+
     if _record_cancelled(task_id, owner_username or ""):
         try:
             if os.path.exists(file_path):
@@ -433,7 +445,6 @@ def process_video_task(
         _release_whisper_gpu_resources()
         return
 
-    ollama_model = (llm_config or {}).get("ollama_model") or DEFAULT_OLLAMA_MODEL
     audio_path = os.path.join("downloads", f"{uuid.uuid4()}.mp3")
 
     extract_path = prompt_paths.get("extract") if prompt_paths else None
@@ -455,7 +466,7 @@ def process_video_task(
 
     def fail(msg, exc_info=False):
         if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
             return
         err_summary = f"【処理エラー】\n{msg}"
         db.update_record(task_id, owner_username or "", status="cancelled", summary=err_summary)
@@ -469,11 +480,12 @@ def process_video_task(
         except Exception:
             pass
         _release_whisper_gpu_resources()
+        _try_ollama_unload_for_config(llm_config, ollama_model)
 
     try:
         if is_transcript:
             if _record_cancelled(task_id, owner_username or ""):
-                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
                 return
             db.update_record(task_id, owner_username or "", status="processing:reading_transcript")
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -489,7 +501,7 @@ def process_video_task(
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
         else:
             if _record_cancelled(task_id, owner_username or ""):
-                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
                 return
             db.update_record(task_id, owner_username or "", status="processing:extracting_audio")
             if is_audio_only:
@@ -513,7 +525,7 @@ def process_video_task(
                         video.close()
 
             if _record_cancelled(task_id, owner_username or ""):
-                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
                 return
             db.update_record(task_id, owner_username or "", status="processing:transcribing")
             wm, wd, wct = _whisper_runtime()
@@ -550,7 +562,7 @@ def process_video_task(
 
         for i, chunk_text in enumerate(chunks_for_ai):
             if _record_cancelled(task_id, owner_username or ""):
-                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
                 return
             db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
             prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
@@ -578,7 +590,7 @@ def process_video_task(
             return
 
         if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
             return
         db.update_record(task_id, owner_username or "", status="processing:merging")
 
@@ -639,7 +651,7 @@ def process_video_task(
         _release_whisper_gpu_resources()
         traceback.print_exc()
         if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path)
+            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
             return
         err_text = str(e)
         err_summary = f"【処理エラー】\n{err_text}"
@@ -653,3 +665,4 @@ def process_video_task(
                 os.remove(file_path)
         except Exception:
             pass
+        _try_ollama_unload_for_config(llm_config, ollama_model)
