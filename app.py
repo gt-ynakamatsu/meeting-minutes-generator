@@ -1,19 +1,19 @@
 import json
-import streamlit as st
-import database as db
-from tasks import process_video_task
-import uuid
 import os
+import uuid
 
-import feature_flags
+import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import database as db
+import feature_flags
+from backend.presets_io import preset_options_for_ui
+from tasks import process_video_task
 from version import __version__
 
-from backend.presets_io import preset_options_for_ui
-from backend.storage import save_uploaded_prompts as save_uploaded_prompts_bytes
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_SVG = os.path.join(APP_DIR, "assets", "svg", "logo.svg")
+from streamlit_app.constants import LOGO_SVG
+from streamlit_app.render import render_error_hints, render_minutes, save_uploaded_prompts
+from streamlit_app.styles import inject_ui_styles
+from streamlit_app.task_status import progress_for_task_status
 
 st.set_page_config(
     page_title="Meeting Minutes Notebook",
@@ -22,116 +22,12 @@ st.set_page_config(
 )
 
 db.init_db()
-
-
-def inject_ui_styles():
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Noto+Sans+JP:wght@400;500;600;700&display=swap');
-        html, body, [class*="css"] {
-            font-family: 'Noto Sans JP', 'DM Sans', system-ui, -apple-system, sans-serif;
-        }
-        div[data-testid="stAppViewContainer"] {
-            background: linear-gradient(165deg, #fbf9f6 0%, #eef4f0 45%, #e8f0eb 100%);
-        }
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #f7faf8 0%, #eef5f1 100%);
-            border-right: 1px solid rgba(27, 67, 50, 0.08);
-        }
-        .mm-hero {
-            background: #ffffff;
-            border-radius: 20px;
-            padding: 1.75rem 2rem;
-            border: 1px solid rgba(27, 67, 50, 0.06);
-            box-shadow: 0 12px 40px rgba(27, 67, 50, 0.06);
-            margin-bottom: 1.25rem;
-        }
-        .mm-muted { color: #5c6f64; font-size: 0.95rem; line-height: 1.65; }
-        .mm-pill {
-            display: inline-block;
-            background: #d8f3dc;
-            color: #1b4332;
-            font-size: 0.78rem;
-            font-weight: 600;
-            padding: 0.2rem 0.65rem;
-            border-radius: 999px;
-            margin-right: 0.35rem;
-        }
-        h1 { letter-spacing: -0.02em; color: #1b4332 !important; }
-        h2, h3 { color: #2d6a4f !important; }
-        div[data-testid="stExpander"] {
-            background: #fff;
-            border-radius: 14px !important;
-            border: 1px solid rgba(27, 67, 50, 0.08) !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_minutes(text):
-    try:
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError
-
-        if data.get("decisions"):
-            st.markdown("##### 決定事項")
-            for d in data["decisions"]:
-                st.markdown(f"- {d.get('text', '')}", unsafe_allow_html=True)
-
-        if data.get("issues"):
-            st.markdown("##### 課題")
-            for i in data["issues"]:
-                st.markdown(f"- {i.get('text', '')}", unsafe_allow_html=True)
-
-        if data.get("items"):
-            st.markdown("##### アクション")
-            for i in data["items"]:
-                who = f"**{i.get('who', '担当未定')}**"
-                due = f"（期限: {i.get('due')}）" if i.get("due") else ""
-                st.markdown(f"- [ ] {who}: {i.get('what', '')}{due}", unsafe_allow_html=True)
-
-        if data.get("notes"):
-            st.markdown("##### 重要メモ")
-            for n in data["notes"]:
-                st.markdown(f"- {n.get('text', '')}", unsafe_allow_html=True)
-
-    except (json.JSONDecodeError, ValueError, TypeError):
-        if text and text != "None":
-            st.markdown(text)
-        else:
-            st.info("詳細な議事録データが作成されていません。")
-
-
-def save_uploaded_prompts(task_id, extract_file, merge_file):
-    ex = extract_file.getvalue() if extract_file is not None else None
-    mg = merge_file.getvalue() if merge_file is not None else None
-    return save_uploaded_prompts_bytes(task_id, ex, mg)
-
-
-def render_error_hints(status: str):
-    if not status.startswith("Error"):
-        return
-    with st.expander("トラブルシューティング（よくある原因）", expanded=False):
-        st.markdown(
-            """
-- **GPU / CUDA**: 動画・音声モードでは Whisper が GPU を使います。`CUDA ... out of memory` のときはワーカーに `WHISPER_MODEL=small` や `WHISPER_COMPUTE_TYPE=int8_float16`（`.env`）を試してください。`nvidia-smi` で空きを確認し、ワーカーログを参照してください。
-- **Ollama**: モデルが未 pull のときは `docker exec ollama-server ollama pull <モデル名>` を実行してください。接続先は `OLLAMA_BASE_URL` です。
-- **OpenAI**: API キー・モデル名・利用上限（429）を確認してください。
-- **テキスト / SRT**: 文字コードは UTF-8 推奨。SRT はタイムコード行の形式が崩れていると読み取れないことがあります。
-- **カスタムプロンプト**: 抽出用に `{CHUNK_TEXT}`、統合用に `{EXTRACTED_JSON}` が含まれているか確認してください。
-            """
-        )
-        st.caption(f"生ステータス: {status}")
-
-
 inject_ui_styles()
 
 if "pending_tasks" not in st.session_state:
     st.session_state.pending_tasks = []
+
+_OLLAMA_HELP = "例: qwen2.5:7b / llama3.2 など。コンテナ内で pull 済みの名前を指定してください。"
 
 hero_cols = st.columns([1, 5])
 with hero_cols[0]:
@@ -232,7 +128,7 @@ with st.sidebar:
     st.markdown("### 今回の解析設定")
     openai_api_key = None
     openai_model = "gpt-4o-mini"
-    ollama_model = "qwen2.5:7b"
+    ollama_default = "qwen2.5:7b"
 
     if feature_flags.openai_feature_enabled():
         llm_provider = st.radio(
@@ -252,20 +148,16 @@ with st.sidebar:
                 ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"],
                 index=0,
             )
-        else:
-            ollama_model = st.text_input(
-                "Ollama モデル名",
-                value="qwen2.5:7b",
-                help="例: qwen2.5:7b / llama3.2 など。コンテナ内で pull 済みの名前を指定してください。",
-            )
     else:
         st.caption("OpenAI / ChatGPT 連携はオフです（`MM_OPENAI_ENABLED`）。Ollama のみ使用します。")
         llm_provider = "ローカル（Ollama）"
-        ollama_model = st.text_input(
-            "Ollama モデル名",
-            value="qwen2.5:7b",
-            help="例: qwen2.5:7b / llama3.2 など。コンテナ内で pull 済みの名前を指定してください。",
-        )
+
+    use_ollama = (not feature_flags.openai_feature_enabled()) or llm_provider == "ローカル（Ollama）"
+    ollama_model = (
+        st.text_input("Ollama モデル名", value=ollama_default, help=_OLLAMA_HELP)
+        if use_ollama
+        else ollama_default
+    )
 
     st.divider()
     st.markdown("### 議事録フォーマット（任意）")
@@ -349,7 +241,9 @@ with st.sidebar:
                 context_json=context_json,
             )
 
-            ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(notification_type, "browser")
+            ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(
+                notification_type, "browser"
+            )
             llm_config = {
                 "provider": "openai" if llm_provider == "OpenAI API" else "ollama",
                 "api_key": openai_api_key,
@@ -399,34 +293,7 @@ if st.session_state.pending_tasks:
                 st.error(f"エラー: {record['filename']} — {status}")
             else:
                 remaining_tasks.append(tid)
-
-                progress = 0
-                status_text = "待機中…"
-                if status == "processing":
-                    progress = 5
-                    status_text = "処理を開始しています…"
-                elif status == "processing:reading_transcript":
-                    progress = 18
-                    status_text = "文字起こし済みテキストを読み込み中…"
-                elif status == "processing:extracting_audio":
-                    progress = 10
-                    status_text = "音声を取り出しています…"
-                elif status == "processing:transcribing":
-                    progress = 40
-                    status_text = "文字起こし中（Whisper）…"
-                elif status.startswith("processing:extracting"):
-                    progress = 55
-                    status_text = "内容を抽出しています…"
-                elif status == "processing:merging":
-                    progress = 80
-                    status_text = "議事録にまとめています…"
-                elif status == "processing:summarizing":
-                    progress = 80
-                    status_text = "要約・整形中…"
-                elif status == "processing:sending_notification":
-                    progress = 95
-                    status_text = "通知を送っています…"
-
+                progress, status_text = progress_for_task_status(status)
                 with st.sidebar:
                     st.caption("進行状況")
                     st.write(f"**{record['filename']}**")
@@ -516,7 +383,9 @@ for r in records:
                     disabled=not summary_text,
                 )
             with tab_edit:
-                st.caption("表示用の整形済みテキストをそのまま編集して保存できます（JSON 議事録の場合は JSON のまま編集になります）。")
+                st.caption(
+                    "表示用の整形済みテキストをそのまま編集して保存できます（JSON 議事録の場合は JSON のまま編集になります）。"
+                )
                 with st.form(f"edit_summary_{r['id']}"):
                     edited = st.text_area(
                         "議事録テキスト",

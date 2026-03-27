@@ -110,7 +110,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | メソッド | パス | 説明 |
 |----------|------|------|
 | GET | `/api/health` | ヘルスチェック |
-| GET | `/api/ollama/models` | **`{ "models": string[] }`**。サーバが **`OLLAMA_BASE_URL`** の Ollama **`GET /api/tags`** を呼び、各モデルの **`name`** をソートして返す。ブラウザは Ollama に直アクセスしない。**認証**: `ApiUser`（認証オフ時も依存注入は通る） |
+| GET | `/api/ollama/models` | **`{ "models": string[] }`**。サーバが **`OLLAMA_BASE_URL`** の Ollama **`GET /api/tags`** を呼び、各エントリの **`name`**（なければ **`model`**）をソートして返す。ブラウザは Ollama に直アクセスしない。**認証不要**（モデル名は機密ではなく、未ログイン時も候補取得可能） |
 | GET | `/api/version` | `version.py` の版情報 |
 | GET | `/api/presets` | `presets_builtin.json` の内容（**`backend/presets_io.load_presets_dict`**、`routes/presets.py`） |
 | POST | `/api/tasks` | `multipart/form-data`: `metadata`（JSON 文字列）、`file`（必須）、任意で `prompt_extract` / `prompt_merge`（.txt） |
@@ -159,7 +159,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
 - **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
-- **Ollama モデル欄**: マウント時・認証状態更新時に **`GET /api/ollama/models`** で候補を取得。**コンボボックス**（自前の候補リスト＋テキスト入力。`<datalist>` は使わずブラウザ差を抑える）。現在値が一覧に無い場合も候補にマージして表示。
+- **Ollama モデル欄**: **初回マウント時と認証状態更新時（`authNonce`）のみ** **`GET /api/ollama/models`** で候補を取得（**ページ再読み込みで更新**。ウィンドウフォーカスや定期ポーリングは行わない）。**ネイティブ `<select>`** で候補のみ選択（手入力不可）。現在値が一覧に無い場合は先頭候補へ寄せる。
 - **OpenAI オフ時の投入フォーム**: 「AI の接続先」は Ollama のみ表示。**OpenAI 用モデルプルダウンは表示しない**（未使用のため）。
 - **環境変数**: `VITE_API_BASE`（空なら相対パス `/api` — 本番 Nginx 配下で利用）。**秘密をここに入れないこと**（後述 §7.2）。
 
@@ -222,7 +222,14 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 ## 8. レガシー（Streamlit）
 
-- **`app.py`**: 引き続きリポジトリに残す。ローカルでは `streamlit run app.py` や従来どおり全量 `Dockerfile` で起動可能。
+- **`app.py`**: エントリのみ。`st.set_page_config`・`db.init_db`・サイドバー／メインのレイアウト呼び出しに留める。ローカルでは `streamlit run app.py` や従来どおり全量 `Dockerfile` で起動可能。
+- **`streamlit_app/`**（`app.py` 専用の薄い UI 層）:
+  | モジュール | 役割 |
+  |------------|------|
+  | `constants.py` | ロゴ SVG パス等 |
+  | `styles.py` | `inject_ui_styles`（グローバル CSS） |
+  | `render.py` | `render_minutes`・`render_error_hints`・`save_uploaded_prompts`（`backend.storage` への委譲） |
+  | `task_status.py` | DB ステータス文字列 → 進捗バー用 `(percent, caption)` |
 - **Python との共通化**: プリセット選択肢は **`backend.presets_io.preset_options_for_ui`**、カスタムプロンプト保存は **`backend.storage.save_uploaded_prompts`**（バイト列）を経由し、**React 経由の API** と同じファイルレイアウト・解釈に揃える。
 - **推奨**: 本番・新規運用は **React + FastAPI + Compose（frontend / api / worker）** を標準とする。
 
@@ -295,3 +302,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.8 | 2026-03-26 | **`§11.1`** に GT-2222 HTTPS サブパス公開の確定運用（`VITE_BASE_PATH`、`VITE_API_BASE`、`MM_CORS_ORIGINS`、frontend Nginx のプレフィックス剥がし、デプロイスクリプト運用）を追記 |
 | 1.9 | 2026-03-26 | **`§11.1`** に TLS 運用（`gt-2222.crt`/`gt-2222.key`、`rootCA.crt` のクライアント手動ルート、同一443 `server` での証明書共有）を追記。`gt2222_https_subpath_troubleshooting.md` の証明書切り分けを拡充 |
 | 1.10 | 2026-03-26 | **§6・§11.1** と `gt2222_https_subpath_troubleshooting.md` にブラウザ通知の許可ポップアップ運用を追記 |
+| 1.11 | 2026-03-27 | **§8** に `streamlit_app/` パッケージ構成を追記（`app.py` の整理）。**`tasks.py`** は `celery_app` の冗長エイリアス削除と **`_assemble_prompt_with_context`** への抽出・統合 |
+| 1.12 | 2026-03-27 | **§6** Ollama モデル候補は初回マウント・認証更新時のみ取得（ページ再読み込みで更新。フォーカス等での再取得なし） |
+| 1.13 | 2026-03-27 | **`GET /api/ollama/models`** を**認証不要**に変更（認証 ON かつ未ログインで 401→一覧空になっていた問題の修正）。**§5** の応答説明を更新。**`ollama_client`** で tags の **`model`** キーにもフォールバック |
+| 1.14 | 2026-03-27 | **§6** Ollama モデル UI を**コンボボックスから `<select>` のみ**に変更（手入力不可） |

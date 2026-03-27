@@ -173,91 +173,9 @@ body {
   outline-offset: 1px;
 }
 
-/* Ollama モデル: select と同じ枠・候補はカスタムリスト（datalist の OS ネイティブ表示を避ける） */
-.sidebar .mm-ollama-combobox {
-  display: flex;
-  align-items: stretch;
-  width: 100%;
-  position: relative;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background-color: #fff;
-  box-shadow: 0 1px 2px rgba(27, 67, 50, 0.06);
-  box-sizing: border-box;
-}
-
-.sidebar .mm-ollama-combobox:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.sidebar .mm-ollama-combobox input {
-  flex: 1;
-  min-width: 0;
-  width: auto;
-  margin: 0;
-  border: none;
-  border-radius: 8px 0 0 8px;
-  box-shadow: none;
-  outline: none;
-  background: transparent;
-  padding: 0.45rem 0.35rem 0.45rem 0.55rem;
-}
-
-.sidebar .mm-ollama-combobox input:focus-visible {
-  outline: none;
-}
-
-.sidebar .mm-ollama-combobox__toggle {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 2.25rem;
-  margin: 0;
-  padding: 0;
-  border: none;
-  border-left: 1px solid var(--border);
-  border-radius: 0 8px 8px 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-}
-
-.sidebar .mm-ollama-combobox__toggle:hover {
-  background: rgba(27, 67, 50, 0.04);
-  color: var(--text);
-}
-
-.mm-ollama-combobox__list {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  margin: 0;
-  padding: 0.3rem 0;
-  list-style: none;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(27, 67, 50, 0.12);
-  max-height: min(240px, 40vh);
-  overflow-y: auto;
-  z-index: 40;
-}
-
-.mm-ollama-combobox__option {
-  padding: 0.4rem 0.65rem;
-  cursor: pointer;
-  font-size: 0.9rem;
-  line-height: 1.35;
-}
-
-.mm-ollama-combobox__option:hover,
-.mm-ollama-combobox__option--active {
-  background: rgba(45, 106, 79, 0.1);
-  color: var(--text);
+/* Ollama モデル: 共通 .sidebar select に加え長い名前向け */
+.sidebar .mm-ollama-model-select {
+  max-width: 100%;
 }
 
 .sidebar textarea {

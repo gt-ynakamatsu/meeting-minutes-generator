@@ -8,8 +8,6 @@ time.sleep(10)
 
 from celery_app import celery_app
 
-app = celery_app
-
 from openai import OpenAI
 import requests
 import json
@@ -391,31 +389,20 @@ def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None):
     _release_whisper_gpu_resources()
 
 
-def _assemble_extract_prompt(base_template, record, preset_extract_hint):
+def _assemble_prompt_with_context(base_template, record, preset_hint, hint_heading):
+    """会議コンテキストとプリセットヒントをベーステンプレの前に付与する。"""
     ctx = build_meeting_context_block(record)
     parts = []
     if ctx:
         parts.append(ctx)
-    if preset_extract_hint:
-        parts.append("# 会議タイプに関する追加指示\n" + preset_extract_hint)
+    if preset_hint:
+        parts.append(f"{hint_heading}\n{preset_hint}")
     if parts:
         return "\n\n".join(parts) + "\n\n---\n\n" + base_template
     return base_template
 
 
-def _assemble_merge_prompt(base_template, record, preset_merge_hint):
-    ctx = build_meeting_context_block(record)
-    parts = []
-    if ctx:
-        parts.append(ctx)
-    if preset_merge_hint:
-        parts.append("# 統合・整形の追加指示\n" + preset_merge_hint)
-    if parts:
-        return "\n\n".join(parts) + "\n\n---\n\n" + base_template
-    return base_template
-
-
-@app.task
+@celery_app.task
 def process_video_task(
     task_id,
     email,
@@ -455,8 +442,12 @@ def process_video_task(
     prompt_merge = load_prompt(merge_path) if merge_path else load_prompt(DEFAULT_PROMPT_MERGE)
 
     preset_ex, preset_mg = preset_hints_for_record(record)
-    extract_shell = _assemble_extract_prompt(prompt_extract, record, preset_ex)
-    merge_shell = _assemble_merge_prompt(prompt_merge, record, preset_mg)
+    extract_shell = _assemble_prompt_with_context(
+        prompt_extract, record, preset_ex, "# 会議タイプに関する追加指示"
+    )
+    merge_shell = _assemble_prompt_with_context(
+        prompt_merge, record, preset_mg, "# 統合・整形の追加指示"
+    )
 
     ext = os.path.splitext(file_path)[1].lower()
     is_transcript = ext in (".txt", ".srt")
@@ -549,7 +540,9 @@ def process_video_task(
                 return
 
         if not (prompt_extract or "").strip():
-            extract_shell = _assemble_extract_prompt("{CHUNK_TEXT}", record, preset_ex)
+            extract_shell = _assemble_prompt_with_context(
+                "{CHUNK_TEXT}", record, preset_ex, "# 会議タイプに関する追加指示"
+            )
 
         extracted_results = []
         extraction_errors = []

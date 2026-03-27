@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter
 
-from backend.deps import ApiUser
 from backend.ollama_client import fetch_ollama_model_names
 from backend.schemas import OllamaModelsResponse
 
@@ -15,8 +14,11 @@ def health():
 
 
 @router.get("/api/ollama/models", response_model=OllamaModelsResponse)
-def ollama_models(_auth: ApiUser):
-    """ブラウザが Ollama に直アクセスできないため、API 経由で /api/tags を返す。"""
+def ollama_models():
+    """ブラウザが Ollama に直アクセスできないため、API 経由で /api/tags を返す。
+
+    モデル名は機密ではないため認証は不要（認証 ON かつ未ログインでもフォーム表示前に候補を取れるようにする）。
+    """
     return OllamaModelsResponse(models=fetch_ollama_model_names())
 
 

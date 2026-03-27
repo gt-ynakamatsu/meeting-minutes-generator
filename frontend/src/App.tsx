@@ -1272,7 +1272,7 @@ function pickTaskMediaFile(list: FileList | null): File | null {
   return null;
 }
 
-/** Ollama /api/tags 由来の候補＋コンボボックス。未登録モデルはそのまま入力可能（datalist は見た目が select と揃わないため未使用） */
+/** Ollama /api/tags 由来の候補のみ（ネイティブ select。手入力不可） */
 function OllamaModelField({
   value,
   onChange,
@@ -1284,177 +1284,44 @@ function OllamaModelField({
   candidates: string[];
   loading: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const [activeIdx, setActiveIdx] = useState(-1);
-  const highlightRef = useRef(-1);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listboxId = "mm-ollama-model-listbox";
-
-  const filtered = useMemo(() => {
-    const q = value.trim().toLowerCase();
-    if (!q) return candidates;
-    return candidates.filter((c) => c.toLowerCase().includes(q));
-  }, [candidates, value]);
-
-  const showList = open && filtered.length > 0;
-
   useEffect(() => {
-    const max = filtered.length - 1;
-    if (max < 0) {
-      if (highlightRef.current !== -1) {
-        highlightRef.current = -1;
-        setActiveIdx(-1);
-      }
-      return;
-    }
-    if (highlightRef.current > max) {
-      highlightRef.current = max;
-      setActiveIdx(max);
-    }
-  }, [filtered.length, value]);
+    if (loading || candidates.length === 0) return;
+    if (!candidates.includes(value)) onChange(candidates[0]);
+  }, [loading, candidates, value, onChange]);
 
-  const setHighlight = (idx: number) => {
-    const max = filtered.length - 1;
-    const next = max < 0 ? -1 : Math.max(0, Math.min(idx, max));
-    highlightRef.current = next;
-    setActiveIdx(next);
-  };
-
-  useEffect(() => {
-    const onDocDown = (e: MouseEvent) => {
-      if (wrapRef.current?.contains(e.target as Node)) return;
-      setOpen(false);
-      highlightRef.current = -1;
-      setActiveIdx(-1);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    return () => document.removeEventListener("mousedown", onDocDown);
-  }, []);
-
-  const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape") {
-      if (open) {
-        e.preventDefault();
-        setOpen(false);
-        highlightRef.current = -1;
-        setActiveIdx(-1);
-      }
-      return;
-    }
-    if (!candidates.length) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (!open) setOpen(true);
-      if (filtered.length === 0) return;
-      const cur = highlightRef.current;
-      const next = cur < 0 ? 0 : cur + 1;
-      setHighlight(next);
-      return;
-    }
-    if (e.key === "ArrowUp" && open && filtered.length > 0) {
-      e.preventDefault();
-      const cur = highlightRef.current;
-      const next = cur < 0 ? 0 : cur - 1;
-      setHighlight(next);
-      return;
-    }
-    if (e.key === "Enter" && open) {
-      const idx = highlightRef.current;
-      if (idx >= 0 && filtered[idx]) {
-        e.preventDefault();
-        onChange(filtered[idx]);
-        setOpen(false);
-        highlightRef.current = -1;
-        setActiveIdx(-1);
-      }
-    }
-  };
+  const selectValue = candidates.includes(value) ? value : (candidates[0] ?? "");
+  const disabled = loading || candidates.length === 0;
 
   return (
     <>
-      <label htmlFor="mm-ollama-model-input">Ollama モデル名</label>
+      <label htmlFor="mm-ollama-model-select">Ollama モデル</label>
       {loading ? (
         <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.25rem" }}>
           Ollama からモデル一覧を取得しています…
         </p>
       ) : null}
-      <div className="mm-ollama-combobox" ref={wrapRef}>
-        <input
-          ref={inputRef}
-          id="mm-ollama-model-input"
-          role="combobox"
-          aria-expanded={showList}
-          aria-controls={showList ? listboxId : undefined}
-          aria-autocomplete="list"
-          value={value}
-          onChange={(e) => {
-            onChange(e.target.value);
-            setOpen(true);
-            highlightRef.current = -1;
-            setActiveIdx(-1);
-          }}
-          onFocus={() => {
-            if (candidates.length > 0) setOpen(true);
-          }}
-          onKeyDown={onInputKeyDown}
-          placeholder={candidates.length > 0 ? "一覧から選ぶかモデル名を入力" : "モデル名（例: qwen2.5:7b）"}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        {candidates.length > 0 ? (
-          <button
-            type="button"
-            className="mm-ollama-combobox__toggle"
-            tabIndex={-1}
-            aria-label="モデル候補を開く"
-            aria-expanded={open}
-            aria-controls={listboxId}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setOpen((o) => !o);
-              highlightRef.current = -1;
-              setActiveIdx(-1);
-              inputRef.current?.focus();
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path
-                d="M6 9l6 6 6-6"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        ) : null}
-        {showList ? (
-          <ul className="mm-ollama-combobox__list" id={listboxId} role="listbox">
-            {filtered.map((m, idx) => (
-              <li
-                key={m}
-                role="option"
-                aria-selected={idx === activeIdx}
-                className={`mm-ollama-combobox__option${idx === activeIdx ? " mm-ollama-combobox__option--active" : ""}`}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onChange(m);
-                  setOpen(false);
-                  highlightRef.current = -1;
-                  setActiveIdx(-1);
-                }}
-                onMouseEnter={() => setHighlight(idx)}
-              >
-                {m}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
+      <select
+        id="mm-ollama-model-select"
+        className="mm-ollama-model-select"
+        value={selectValue}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        aria-busy={loading}
+      >
+        {candidates.length === 0 ? (
+          <option value="">{loading ? "読み込み中…" : "（モデルがありません）"}</option>
+        ) : (
+          candidates.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))
+        )}
+      </select>
       {!loading && candidates.length === 0 ? (
         <p className="muted" style={{ fontSize: "0.78rem", margin: "0.25rem 0 0", lineHeight: 1.45 }}>
-          一覧を取得できませんでした。Ollama が起動しているか、API コンテナの <code>OLLAMA_BASE_URL</code>（Docker では <code>llm-net</code> 経由）を確認してください。手入力は可能です。
+          一覧を取得できませんでした。Ollama が起動しているか、API コンテナの <code>OLLAMA_BASE_URL</code>（Docker では <code>llm-net</code> 経由）を確認してください。
+          表示されるのは <strong>その Ollama に pull 済み</strong>のモデルだけです。pull 後は<strong>ページを再読み込み</strong>してください。
         </p>
       ) : null}
     </>
@@ -1668,6 +1535,7 @@ function AppMain({
       .catch(() => {});
   }, []);
 
+  /** Ollama 候補はページ読み込み時と認証状態更新時のみ取得（フォーカス／定期取得は行わない） */
   useEffect(() => {
     let cancelled = false;
     setOllamaTagsLoading(true);
