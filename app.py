@@ -199,6 +199,11 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### ファイル")
+    transcript_only = st.checkbox(
+        "書き起こしのみ（.txt/.srt は読み取り、動画・音声は Whisper のみ。議事録は作らない）",
+        value=False,
+        help="LLM（Ollama / OpenAI）は使いません。OpenAI キーは不要です。",
+    )
     uploaded_file = st.file_uploader(
         "動画 / 音声 / 文字起こし",
         type=["mp4", "mp3", "m4a", "wav", "txt", "srt"],
@@ -208,7 +213,7 @@ with st.sidebar:
     can_submit = uploaded_file is not None
     if notification_type == "Webhook" and not email:
         can_submit = False
-    if llm_provider == "OpenAI API" and not openai_api_key:
+    if llm_provider == "OpenAI API" and not openai_api_key and not transcript_only:
         can_submit = False
 
     if st.button("解析をキューに追加", type="primary", disabled=not can_submit, use_container_width=True):
@@ -239,6 +244,7 @@ with st.sidebar:
                 meeting_date=meeting_date.strip(),
                 preset_id=preset_id,
                 context_json=context_json,
+                transcript_only=transcript_only,
             )
 
             ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(
@@ -250,6 +256,7 @@ with st.sidebar:
                 "ollama_model": ollama_model,
                 "openai_model": openai_model,
                 "notification_type": ntype,
+                "transcript_only": transcript_only,
             }
             prompt_paths = save_uploaded_prompts(task_id, fmt_extract, fmt_merge)
             process_video_task.delay(

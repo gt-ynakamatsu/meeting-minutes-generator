@@ -1,6 +1,6 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MeetingContext(BaseModel):
@@ -26,6 +26,16 @@ class TaskSubmitMetadata(BaseModel):
     tags: str = ""
     preset_id: str = "standard"
     context: MeetingContext = Field(default_factory=MeetingContext)
+    # True のとき書き起こしまで（.txt/.srt 読込 or Whisper）で完了し、議事録用 LLM は実行しない
+    transcript_only: bool = False
+    # 旧 API 名（誤解を招くが互換のため残す）。True なら transcript_only と同義
+    audio_extract_only: bool = False
+
+    @model_validator(mode="after")
+    def _merge_transcript_only_legacy(self) -> "TaskSubmitMetadata":
+        if self.audio_extract_only:
+            self.transcript_only = True
+        return self
 
 
 class SummaryPatch(BaseModel):

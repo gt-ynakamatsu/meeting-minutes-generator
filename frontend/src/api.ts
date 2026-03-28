@@ -42,6 +42,8 @@ export interface TaskSubmitMetadata {
   tags: string;
   preset_id: string;
   context: MeetingContext;
+  /** true のとき書き起こしまで（Whisper または .txt/.srt）。議事録用 LLM は使わない */
+  transcript_only?: boolean;
 }
 
 export interface RecordRow {
@@ -62,6 +64,8 @@ export interface RecordRow {
   meeting_date: string | null;
   preset_id: string | null;
   context_json: string | null;
+  /** 1 のとき書き起こしのみジョブ（議事録 LLM なし） */
+  transcript_only?: number | boolean;
   /** /api/queue のみ。transcript があり、かつ Whisper 実行中（processing:transcribing）でない */
   transcript_ready?: boolean;
 }
@@ -372,3 +376,4 @@ export async function downloadExportTranscriptMd(recordId: string, filename: str
   const blob = await res.blob();
   triggerBlobDownload(blob, filename);
 }
+

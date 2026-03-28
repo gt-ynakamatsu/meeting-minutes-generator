@@ -49,7 +49,7 @@ graph TB
 *   **`backend/main.py`**: アプリケーション生成、**CORS**、**lifespan**（起動時 DB 初期化・保持期限パージ）、各 **`APIRouter`** の `include_router` のみ。
 *   **`backend/routes/`**: パス別ハンドラ（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records`）。肥大化した単一 `main` を避け、変更箇所の特定を容易にする。
 *   **共通ライブラリ（API とワーカー／Streamlit で共有しうる軽量モジュール）**:
-    *   **`backend/ollama_client.py`** … Ollama のベース URL、タグ一覧取得、generate 用 URL（**api** のモデル一覧 API と **worker** の推論で同じ解釈）
+    *   **`backend/ollama_client.py`** … Ollama のベース URL、タグ一覧取得（**api**）、**`ollama_generate_url`** と **`try_ollama_unload_model`**（**worker** の **`tasks`** が推論先 URL と VRAM 解放に利用。**`POST /api/generate` の HTTP クライアントは `tasks.call_llm` の `requests`**）
     *   **`backend/presets_io.py`** … `presets_builtin.json`（**api**・**tasks**・**app.py**）
     *   **`backend/storage.py`** … ユーザープロンプト一時保存（**api** の multipart と **Streamlit** のアップロード）
     *   **`backend/http_utils.py`** … ダウンロード応答ヘッダ等（**records** ルート）
@@ -104,7 +104,11 @@ sequenceDiagram
 
     W->>D: Status更新: processing:merging
     W->>O: POST /api/generate (Merge Prompt)
-    O-->>W: Final Markdown
+    alt マージ成功
+        O-->>W: Final Markdown
+    else タイムアウト等
+        Note over W,O: summary は Merge failed + JSON、status は completed（この分岐では unload 呼び出しなし）
+    end
 
     W->>D: レコード更新 (Status: completed, Result保存)
     W-->>U: 通知 (Webhook / Browser)
@@ -119,8 +123,8 @@ sequenceDiagram
 3.  `processing:transcribing`: Whisperによる文字起こし実行中
 4.  `processing:extracting (N/M)`: LLMによる構造化データ抽出中（M個中N個目）
 5.  `processing:merging`: 抽出データの統合と最終サマリー生成中
-6.  `completed`: 全処理完了
-7.  `Error: <message>`: 処理中に例外が発生した場合
+6.  `completed`: 全処理完了（マージのみ失敗時は **`summary` が `Merge failed` で始まる**ことがある）
+7.  `cancelled`: ユーザー破棄、または **`fail()`**／外側 **`except`** による失敗（`summary` にエラー要約）
 
 ## 4. データモデル設計 (Physical)
 
@@ -145,7 +149,7 @@ SQLite3 (`data/minutes.db`) を使用。
     *   API → Redis: `redis:6379`
     *   Worker → Redis: `redis:6379`
     *   API → Ollama: **`OLLAMA_BASE_URL`** の **`GET /api/tags`**（タグ名一覧。UI のモデル候補用。ブラウザは Ollama に直結しない）
-    *   Worker → Ollama: **`OLLAMA_BASE_URL`**（推論は **`POST /api/generate`** 等。Compose 既定は **`http://ollama-server:11434`**。コンテナ名・URL が違えば `.env` で指定）。リクエスト **`options.num_ctx`** は **`tasks.py` の `call_llm` で 4096**（VRAM／KV 負荷抑制。HTTP タイムアウト 600 秒）
+    *   Worker → Ollama: **`OLLAMA_BASE_URL`**（推論は **`tasks.call_llm`** が **`requests.post(ollama_generate_url(), …)`**。**`options.num_ctx: 4096`**・**`timeout=600`** はコード固定）。**`try_ollama_unload_model`** で **`keep_alive: 0`** を送り得る（**`OLLAMA_UNLOAD_ON_TASK_END`** で無効化可）。**破棄／fail／未捕捉例外後**。**マージ `Merge failed` フォールバック時はアンロードなし**
 *   **機能フラグ**: リポジトリ直下の **`feature_flags.py`** が **`MM_OPENAI_ENABLED`** を解釈し、API・Celery・Streamlit で共通利用する。
 
 ### 5.1 HTTPS + サブパス公開（GT-2222 運用）
@@ -172,4 +176,4 @@ SQLite3 (`data/minutes.db`) を使用。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
 
 ---
-*Last Updated: 2026-03-27（§5 Worker→Ollama に `num_ctx` 4096・タイムアウト 600 秒を追記）*
+*Last Updated: 2026-03-28（§2.2・§3.1・§3.2・§5 を現行 `tasks`/`ollama_client` に同期: アンロード条件・マージ失敗・`cancelled`）*

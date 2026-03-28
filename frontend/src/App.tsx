@@ -569,6 +569,11 @@ function recordIsActiveJob(status: string): boolean {
   return status === "pending" || status.startsWith("processing");
 }
 
+function recordIsTranscriptOnly(row: RecordRow): boolean {
+  const v = row.transcript_only;
+  return v === 1 || v === true;
+}
+
 function RecordCard({
   row,
   onSaved,
@@ -632,6 +637,11 @@ function RecordCard({
 
       {statusStr === "completed" ? (
         <>
+          {recordIsTranscriptOnly(row) ? (
+            <p className="muted" style={{ fontSize: "0.88rem", margin: "0 0 0.75rem" }}>
+              このジョブは<strong>書き起こしのみ</strong>です（議事録の自動生成はしていません）。下の「書き起こし」タブやエクスポートでテキストを取得できます。
+            </p>
+          ) : null}
           <div className="tabs tabs--record">
             <div className="tabs--record__modes">
               <button type="button" className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>
@@ -1412,6 +1422,7 @@ function AppMain({
   const [file, setFile] = useState<File | null>(null);
   const [promptExtract, setPromptExtract] = useState<File | null>(null);
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
+  const [transcriptOnly, setTranscriptOnly] = useState(false);
   const [fileDropActive, setFileDropActive] = useState(false);
   const fileDragDepth = useRef(0);
   const mainFileInputRef = useRef<HTMLInputElement>(null);
@@ -1757,7 +1768,8 @@ function AppMain({
     !!file &&
     (notification !== "webhook" || email.trim().length > 0) &&
     emailRecipientOk &&
-    (effectiveLlmProvider !== "openai" ||
+    (transcriptOnly ||
+      effectiveLlmProvider !== "openai" ||
       (serverOpenaiMode ? openaiConfigured : openaiKey.trim().length > 0));
 
   const closeSettings = useCallback(() => {
@@ -1808,6 +1820,7 @@ function AppMain({
         tone: toneVal,
         action_rules: actionRules.trim(),
       },
+      transcript_only: transcriptOnly,
     };
     const fd = new FormData();
     fd.append("metadata", JSON.stringify(meta));
@@ -1958,6 +1971,23 @@ function AppMain({
             <label>アクション記載ルール</label>
             <textarea value={actionRules} onChange={(e) => setActionRules(e.target.value)} />
           </details>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", margin: "0.75rem 0 0", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={transcriptOnly}
+              onChange={(e) => setTranscriptOnly(e.target.checked)}
+              style={{ marginTop: "0.2rem" }}
+            />
+            <span style={{ fontSize: "0.92rem", lineHeight: 1.5 }}>
+              <strong>書き起こしのみ</strong>（.txt / .srt は読み取り、動画・音声は Whisper のみ。議事録は作らない）
+            </span>
+          </label>
+          {transcriptOnly ? (
+            <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0.65rem", lineHeight: 1.5 }}>
+              Ollama / OpenAI は使いません。下のモデル指定は参照されません。完了後に書き起こしをダウンロードできます。
+            </p>
+          ) : null}
 
           <h3>解析設定</h3>
           {serverOpenaiMode && openaiFeatureEnabled ? (
@@ -2248,7 +2278,7 @@ function AppMain({
                           disabled={!q.transcript_ready}
                           title={
                             q.transcript_ready
-                              ? "議事録ができる前に .md で保存できます（.txt/.srt 直読みの場合は読み込み直後から可）"
+                              ? "議事録ができる前に .md で保存できます（.txt/.srt 直読み・書き起こしのみは読み込み直後から可）"
                               : String(q.status || "") === "processing:transcribing"
                                 ? "Whisper が文字起こし中です。完了までお待ちください"
                                 : "文字起こしが終わると押せます（動画・音声は数十秒〜）"

@@ -1,0 +1,20 @@
+{
+  "defaults": {
+    "num_ctx": 4096
+  },
+  "profiles": [
+    {
+      "match": "qwen2.5:32b",
+      "comment": "VRAM に余裕がある場合だけ num_ctx を上げる例（コメント用キーは無視される）",
+      "num_ctx": 8192,
+      "merge_temperature": 0.25
+    },
+    {
+      "match": "my-finetune-",
+      "num_predict": 4096,
+      "top_p": 0.9,
+      "extract_temperature": 0,
+      "merge_temperature": 0.2
+    }
+  ]
+}

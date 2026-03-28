@@ -115,6 +115,7 @@ async def create_task(
         meeting_date=meta.meeting_date.strip(),
         preset_id=meta.preset_id.strip() or "standard",
         context_json=ctx_json,
+        transcript_only=bool(meta.transcript_only),
     )
 
     if meta.llm_provider == "openai":
@@ -124,6 +125,7 @@ async def create_task(
             "ollama_model": meta.ollama_model,
             "openai_model": openai_model,
             "notification_type": meta.notification_type,
+            "transcript_only": bool(meta.transcript_only),
         }
     else:
         llm_config = {
@@ -132,6 +134,7 @@ async def create_task(
             "ollama_model": meta.ollama_model,
             "openai_model": meta.openai_model,
             "notification_type": meta.notification_type,
+            "transcript_only": bool(meta.transcript_only),
         }
 
     pe_bytes = await prompt_extract.read() if prompt_extract and prompt_extract.filename else None

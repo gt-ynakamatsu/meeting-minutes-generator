@@ -1,7 +1,8 @@
 import gc
-import os
-import time
 import logging
+import os
+import sys
+import time
 
 # Redis 起動待ち（ワーカーが tasks を import するときのみ実行）
 time.sleep(10)
@@ -17,6 +18,7 @@ import torch
 import database as db
 import feature_flags
 from backend.ollama_client import ollama_generate_url, try_ollama_unload_model
+from backend.ollama_model_profiles import resolve_ollama_options
 from backend.presets_io import load_presets_dict
 from moviepy.editor import AudioFileClip, VideoFileClip
 import uuid
@@ -93,10 +95,29 @@ def _whisper_runtime():
     return model, device, compute_type
 
 
-def _release_whisper_gpu_resources(device=None):
-    """Whisper（CT2）が掴んだ GPU メモリを早く返す。エラー・破棄後の取りこぼしや CPU 実行時も安全に呼べる。"""
-    dev = (device or os.getenv("WHISPER_DEVICE") or "cuda").strip().lower() or "cuda"
+def _trim_process_memory() -> None:
+    """Python ガベージ回収と（Linux glibc で）ヒープの OS 返却を試みる。MoviePy/ffmpeg・大きなリスト後に有効なことがある。"""
+    if (os.getenv("MM_WORKER_TRIM_RAM") or "1").strip().lower() in ("0", "false", "no"):
+        return
     gc.collect()
+    gc.collect()
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except OSError:
+        pass
+    except Exception:
+        logger.debug("malloc_trim に失敗（無視）", exc_info=True)
+
+
+def _release_whisper_gpu_resources(device=None):
+    """Whisper（CT2）の GPU と、あわせてプロセス RAM 回収を促す。"""
+    _trim_process_memory()
+    dev = (device or os.getenv("WHISPER_DEVICE") or "cuda").strip().lower() or "cuda"
     if dev != "cuda":
         return
     try:
@@ -309,7 +330,7 @@ def extract_json_block(text):
     return None
 
 
-def call_llm(prompt, config, temperature=0.0, json_mode=False):
+def call_llm(prompt, config, temperature=0.0, json_mode=False, ollama_phase=None):
     cfg = config or {}
     provider = cfg.get("provider", "ollama")
 
@@ -342,6 +363,11 @@ def call_llm(prompt, config, temperature=0.0, json_mode=False):
     else:
         try:
             model_name = cfg.get("ollama_model") or DEFAULT_OLLAMA_MODEL
+            ollama_options = resolve_ollama_options(
+                model_name,
+                phase=ollama_phase,
+                caller_temperature=temperature,
+            )
             res = requests.post(
                 OLLAMA_URL,
                 json={
@@ -349,7 +375,7 @@ def call_llm(prompt, config, temperature=0.0, json_mode=False):
                     "prompt": prompt,
                     "format": "json" if json_mode else None,
                     "stream": False,
-                    "options": {"temperature": temperature, "num_ctx": 4096},
+                    "options": ollama_options,
                 },
                 timeout=600,
             )
@@ -412,6 +438,50 @@ def _assemble_prompt_with_context(base_template, record, preset_hint, hint_headi
     return base_template
 
 
+def _finish_transcript_only_task(
+    task_id,
+    owner_username,
+    email,
+    filename,
+    file_path,
+    audio_path,
+    webhook_url,
+    notification_type,
+    llm_config,
+    ollama_model,
+):
+    """書き起こしのみモード: transcript 保存済みのあとで完了し、投入ファイルを掃除する。"""
+    summary_md = (
+        "## 書き起こしのみ完了\n\n"
+        f"- 元ファイル: {filename}\n"
+        "- **議事録（LLM による抽出・統合）は実行していません。**\n"
+        "- アーカイブの「書き起こし」タブ、または書き起こしのエクスポートでテキストを取得できます。\n"
+    )
+    db.update_record(task_id, owner_username or "", status="completed", summary=summary_md)
+    try:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except OSError:
+        pass
+    _cleanup_user_prompts(task_id)
+    _release_whisper_gpu_resources()
+    _try_ollama_unload_for_config(llm_config, ollama_model)
+    final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
+    if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
+        msg = f"✅ **書き起こし完了**（議事録なしモード）\nファイル: {filename}\n[アーカイブで書き起こしを確認]"
+        try:
+            requests.post(
+                final_webhook_url,
+                json={"text": msg, "email": email, "filename": filename},
+            )
+        except Exception:
+            pass
+    elif notification_type == "email" and email:
+        _maybe_send_completion_email(email, filename, task_id)
+
+
 @celery_app.task
 def process_video_task(
     task_id,
@@ -423,9 +493,10 @@ def process_video_task(
     prompt_paths=None,
     owner_username="",
 ):
-    # notification_type は API が llm_config に同梱（Celery kwargs だと古いワーカーが TypeError になるため）
+    # notification_type / transcript_only は API が llm_config に同梱（古いワーカー互換のため kwargs 不使用）
     _lc = dict(llm_config) if isinstance(llm_config, dict) else {}
     notification_type = _lc.pop("notification_type", "browser")
+    transcript_only = bool(_lc.pop("transcript_only", False) or _lc.pop("audio_extract_only", False))
     llm_config = _lc if _lc else None
 
     db.purge_expired_minutes(owner_username or "")
@@ -499,6 +570,20 @@ def process_video_task(
                 fail("チャンクを生成できませんでした")
                 return
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
+            if transcript_only:
+                _finish_transcript_only_task(
+                    task_id,
+                    owner_username,
+                    email,
+                    filename,
+                    file_path,
+                    audio_path,
+                    webhook_url,
+                    notification_type,
+                    llm_config,
+                    ollama_model,
+                )
+                return
         else:
             if _record_cancelled(task_id, owner_username or ""):
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
@@ -523,6 +608,8 @@ def process_video_task(
                 finally:
                     if video is not None:
                         video.close()
+
+            _trim_process_memory()
 
             if _record_cancelled(task_id, owner_username or ""):
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
@@ -550,6 +637,20 @@ def process_video_task(
             if not chunks_for_ai:
                 fail("文字起こし結果が空でした")
                 return
+            if transcript_only:
+                _finish_transcript_only_task(
+                    task_id,
+                    owner_username,
+                    email,
+                    filename,
+                    file_path,
+                    audio_path,
+                    webhook_url,
+                    notification_type,
+                    llm_config,
+                    ollama_model,
+                )
+                return
 
         if not (prompt_extract or "").strip():
             extract_shell = _assemble_prompt_with_context(
@@ -567,7 +668,13 @@ def process_video_task(
             db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
             prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
             try:
-                response_text = call_llm(prompt, llm_config, temperature=0, json_mode=True)
+                response_text = call_llm(
+                    prompt,
+                    llm_config,
+                    temperature=0,
+                    json_mode=True,
+                    ollama_phase="extract",
+                )
                 data = extract_json_block(response_text)
                 if data:
                     extracted_results.append(data)
@@ -606,9 +713,16 @@ def process_video_task(
         else:
             prompt = merge_shell.replace("{EXTRACTED_JSON}", json_str)
             try:
-                final_summary = call_llm(prompt, llm_config, temperature=0.2, json_mode=False)
+                final_summary = call_llm(
+                    prompt,
+                    llm_config,
+                    temperature=0.2,
+                    json_mode=False,
+                    ollama_phase="merge",
+                )
             except Exception as e:
                 final_summary = f"Merge failed (Error: {e})\n\n{json_str}"
+                _try_ollama_unload_for_config(llm_config, ollama_model)
 
         if final_summary.startswith("```markdown"):
             final_summary = final_summary.replace("```markdown", "", 1)
@@ -644,6 +758,10 @@ def process_video_task(
         except Exception:
             pass
         _cleanup_user_prompts(task_id)
+
+        # 次ジョブ開始時の GPU / Ollama VRAM 不足を防ぐ（同一ワーカーで連続処理する場合）
+        _release_whisper_gpu_resources()
+        _try_ollama_unload_for_config(llm_config, ollama_model)
 
     except Exception as e:
         import traceback

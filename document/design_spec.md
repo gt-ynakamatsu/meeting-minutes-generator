@@ -77,14 +77,14 @@ graph TD
     *   課題 (Issues)
     *   アクションアイテム (Items/Actions)
     *   重要メモ (Notes)
-6.  **統合 (Reduce)**: 全チャンクの抽出結果をマージし、再度LLMを実行して重複排除・文章の整形で最終的なMarkdown議事録を生成。
+6.  **統合 (Reduce)**: 全チャンクの抽出結果をマージし、再度LLMを実行して重複排除・文章の整形で最終的なMarkdown議事録を生成。Ollama がタイムアウト等で失敗した場合は **`summary` が `Merge failed (Error: …)` で始まり続けて抽出 JSON** となり、**`status` は `completed`** のまま（**`try_ollama_unload` はこの経路では呼ばれない**）。
 7.  **完了・通知**: データベースを更新し、Webhookまたはブラウザ経由でユーザーに完了を通知。
 
 #### 3.1.1 Ollama 呼び出しパラメータ（ワーカー・CLI）
 
-- **Celery ワーカー**（`tasks.py` の `call_llm`）は、Ollama **`POST /api/generate`** に **`options.num_ctx: 4096`** を付与する。VRAM・KV キャッシュ負荷を抑え、GPU メモリが限られる環境での **CPU オフロード過多**を緩和するため（以前は **8192**。長会議ではプロンプト切り詰めが増える可能性があり、品質・失敗時はコード上で **6144**／**8192** 等の見直しを検討）。
-- 同一呼び出しの **HTTP タイムアウトは 600 秒**。
-- **CLI パイプライン**（ホスト直実行）: `pipeline/02_extract.py` はリクエストに **`num_ctx: 4096`**、`03_merge.py` は **`NUM_CTX = 4096`** とし、ワーカーと揃える。
+- **Celery ワーカー**（**`tasks.call_llm`**）は **`requests.post`** で **`backend/ollama_client.ollama_generate_url()`**（**`POST /api/generate`**）へ送る。**`options.num_ctx: 4096`**・**`timeout=600`** は **コード内固定**（環境変数 `OLLAMA_NUM_CTX` 等は未使用）。
+- **VRAM 早期解放**: **`backend/ollama_client.try_ollama_unload_model`**（**`keep_alive: 0`**）。**`tasks`** の **破棄掃除・`fail`・外側 `except`** から **`_try_ollama_unload_for_config`** 経由で呼ぶ。**`OLLAMA_UNLOAD_ON_TASK_END`** が **`0`/`false`/`no`** ならスキップ。OpenAI 経路ではスキップ。**マージのみ失敗**（`Merge failed` フォールバック）では **呼ばない**。
+- **CLI パイプライン**: **`pipeline/02_extract.py`** はローカル **`_ollama_generate_url`** と **`extract_json_block`**。**`03_merge.py`** は **`NUM_CTX=4096`**, **`REQ_TIMEOUT=600`**。ワーカーと値は揃えるが **コード共通化モジュールはない**。
 
 ### 3.2 データベース設計 (簡易スキーマ)
 
@@ -173,18 +173,18 @@ graph TD
     *   `jobs.py` … `POST /tasks`（Celery 投入）
     *   `records.py` … 一覧・キュー・1件・破棄・エクスポート・summary PATCH
 *   `backend/schemas.py`, `backend/deps.py`: Pydantic スキーマ・FastAPI 依存（JWT 管理者等）
-*   `backend/ollama_client.py`: **`OLLAMA_BASE_URL`** 解決、**`/api/tags`**（モデル名一覧）、**`/api/generate` URL**（ワーカー `tasks.py` からも利用）
+*   `backend/ollama_client.py`: **`OLLAMA_BASE_URL`** 解決、**`/api/tags`**、**`ollama_generate_url`**、**`try_ollama_unload_model`**（**`tasks`** が推論 URL とアンロードに利用。推論の **`requests.post` 本体は `tasks.call_llm`**）
 *   `backend/presets_io.py`: **`presets_builtin.json`** の読込（**`GET /api/presets`** と **Streamlit `app.py`**・**`tasks.py`** のプリセットで共通化）
 *   `backend/http_utils.py`: エクスポート用 **Content-Disposition**、SQLite 行の **dict 化**
 *   `backend/passwords.py`: ログイン時の **bcrypt 検証**
 *   `backend/storage.py`: ユーザープロンプト一時ファイル保存（**API** と **Streamlit** が同じ関数を利用可能）
 *   `feature_flags.py`: **`MM_OPENAI_ENABLED`** 等の機能 ON/OFF（API・ワーカー・`app.py` で共通化）
 *   `app.py`: Streamlit（レガシー UI。プリセット・プロンプト保存は **`backend.presets_io`** / **`backend.storage`** で API と整合）
-*   `tasks.py`: Celery ワーカー／パイプライン実装（**`backend.ollama_client`**・**`backend.presets_io`** を参照して URL／プリセットを API と整合）。Ollama 経路は **`call_llm` 内で `num_ctx: 4096`** 等を固定（§3.1.1）
+*   `tasks.py`: Celery ワーカー（**`@celery_app.task`** の **`process_video_task`**）。**`call_llm`** が Ollama 時 **`requests.post`**（**`ollama_generate_url`**、**`num_ctx` 4096**、**timeout 600**）。**`extract_json_block`** は本モジュール内関数。**`backend.ollama_client`** の **`try_ollama_unload_model`** をエラー／破棄時に利用（§3.1.1）
 *   `celery_app.py`: Celery アプリ定義（API はここだけ import して `send_task`）
 *   `database.py`: DB 操作ラッパー（認証時は `registry.db`・ユーザー別 `minutes.db`）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
 ---
-*Last Updated: 2026-03-27（§3.1.1 Ollama `num_ctx` 4096・タイムアウト、`tasks.py`／`pipeline` 整合を追記）*
+*Last Updated: 2026-03-28（§3.1・§3.1.1・付録を現行コードに同期: `call_llm`/`try_ollama_unload`/`OLLAMA_UNLOAD_ON_TASK_END`、マージ失敗フォールバック、アンロード非対象、pipeline 重複）*

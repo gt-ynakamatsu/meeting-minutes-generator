@@ -5,9 +5,27 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 議事録用ドロップダウンから除外（埋め込み・RAG 専用など）。名前に部分一致（小文字）。
+_DEFAULT_OLLAMA_UI_EXCLUDE_SUBSTR: Tuple[str, ...] = ("nomic-embed-text",)
+
+
+def _ollama_model_excluded_from_ui(name: str) -> bool:
+    lo = (name or "").strip().lower()
+    if not lo:
+        return True
+    for s in _DEFAULT_OLLAMA_UI_EXCLUDE_SUBSTR:
+        if s in lo:
+            return True
+    extra = os.getenv("MM_OLLAMA_UI_EXCLUDE_CONTAINS") or ""
+    for part in extra.split(","):
+        p = part.strip().lower()
+        if p and p in lo:
+            return True
+    return False
 
 
 def ollama_base_url() -> str:
@@ -90,10 +108,16 @@ def fetch_ollama_model_names(timeout_sec: float = 6.0) -> List[str]:
         raw = m.get("name") or m.get("model")
         if isinstance(raw, str) and raw.strip():
             names.append(raw.strip())
-    out = sorted(set(names))
-    if not out:
+    out = sorted({n for n in names if not _ollama_model_excluded_from_ui(n)})
+    if not names:
         logger.warning(
             "Ollama /api/tags は成功したが models が空、または name/model を解釈できませんでした (%s)",
+            base,
+        )
+    elif not out and names:
+        logger.warning(
+            "Ollama /api/tags のモデルがすべて UI 除外ルールに該当しました (%s)。"
+            " MM_OLLAMA_UI_EXCLUDE_CONTAINS を確認してください。",
             base,
         )
     return out

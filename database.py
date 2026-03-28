@@ -80,6 +80,8 @@ def _migrate_records_columns(conn):
         ("context_json", "TEXT DEFAULT ''"),
         ("processing_started_at", "TIMESTAMP"),
         ("processing_finished_at", "TIMESTAMP"),
+        ("audio_extract_only", "INTEGER NOT NULL DEFAULT 0"),
+        ("transcript_only", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for col, decl in additions:
         if col not in existing:
@@ -424,6 +426,7 @@ def save_initial_task(
     meeting_date="",
     preset_id="",
     context_json="",
+    transcript_only: bool = False,
 ):
     init_minutes_db(owner)
     path = minutes_db_path(owner)
@@ -434,8 +437,8 @@ def save_initial_task(
             """
             INSERT INTO records (
                 id, email, filename, status, created_at,
-                topic, tags, category, meeting_date, preset_id, context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                topic, tags, category, meeting_date, preset_id, context_json, transcript_only
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -449,6 +452,7 @@ def save_initial_task(
                 meeting_date or "",
                 preset_id or "",
                 context_json or "",
+                1 if transcript_only else 0,
             ),
         )
 
