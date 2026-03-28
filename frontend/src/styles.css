@@ -12,18 +12,25 @@
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
+html {
   height: 100%;
 }
 
 body {
   margin: 0;
+  min-height: 100%;
+  min-height: 100dvh;
   font-family: "Noto Sans JP", system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
-  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100%;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 .layout {
@@ -39,12 +46,19 @@ body {
 .layout--app {
   grid-template-columns: 1fr;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: 100%;
-  max-height: 100%;
+  flex: 1;
   min-height: 0;
+  width: 100%;
+  max-width: 100%;
   padding: 0.55rem 0.85rem 0.45rem;
   gap: 0.55rem;
   box-sizing: border-box;
+}
+
+/* グリッド2行目: 既定 min-height:auto だと子の flex/1fr が縮めず、リサイズで溢れやすい */
+.layout--app > .layout-columns {
+  min-height: 0;
+  min-width: 0;
 }
 
 .layout-columns {
@@ -66,14 +80,16 @@ body {
     grid-template-columns: 1fr;
   }
 
+  /* 狭い幅はビューポート固定ではなくコンテンツ高で伸ばし、body 全体をスクロール */
   .layout--app {
-    height: auto;
-    max-height: none;
-    min-height: 100vh;
+    flex: 1 1 auto;
+    min-height: auto;
+    grid-template-rows: auto auto auto;
   }
 
   .layout-columns {
     grid-template-columns: 1fr;
+    min-height: 0;
   }
 }
 
@@ -116,6 +132,8 @@ body {
   font-size: 0.82rem;
   line-height: 1.45;
   margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .muted {
@@ -184,11 +202,14 @@ body {
 }
 
 .sidebar--scroll {
-  max-height: 100%;
   min-height: 0;
   overflow-y: auto;
   padding: 0.75rem 0.85rem;
   align-self: stretch;
+  /* .sidebar の height:fit-content を打ち消し、右列と同じ行高で内側スクロール */
+  height: 100%;
+  max-height: 100%;
+  box-sizing: border-box;
 }
 
 .sidebar--scroll textarea {
@@ -282,7 +303,6 @@ body {
 .main-queue .queue {
   flex: 1;
   min-height: 0;
-  max-height: min(30vh, 280px);
   overflow-y: auto;
 }
 
@@ -308,6 +328,15 @@ body {
   margin-bottom: 0;
 }
 
+@media (max-width: 960px) {
+  /* 狭い幅ではページ全体のスクロールに任せ、左パネルだけが窮屈に閉じ込められないようにする */
+  .sidebar.sidebar--scroll {
+    height: auto;
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+
 @media (max-width: 520px) {
   .layout-columns > main.main--stack {
     height: auto;
@@ -327,6 +356,13 @@ body {
   .main-file-drop {
     min-height: 7.75rem;
     padding: 0.85rem 0.6rem;
+  }
+}
+
+/* 縦に窮屈なときだけキュー領域に上限（デッドスペース防止のため常時 max-height は付けない） */
+@media (max-height: 720px) and (min-width: 961px) {
+  .main-queue .queue {
+    max-height: min(36vh, 320px);
   }
 }
 
