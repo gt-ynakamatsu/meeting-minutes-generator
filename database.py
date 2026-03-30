@@ -583,22 +583,19 @@ def discard_task(task_id: str, owner: str = "") -> None:
     update_record(task_id, owner or "", status="cancelled")
 
 
-def get_recent_records(
-    owner: str = "",
-    days=7,
-    search="",
-    category="",
-    status_filter="",
-):
-    init_minutes_db(owner)
-    purge_expired_minutes_db_path(minutes_db_path(owner))
-    limit = datetime.now() - timedelta(days=days)
+def _recent_records_where_clause(
+    days: int,
+    search: str,
+    category: str,
+    status_filter: str,
+) -> tuple[str, list[Any]]:
+    limit_dt = datetime.now() - timedelta(days=days)
     q = (search or "").strip()
     cat = (category or "").strip()
     sf = (status_filter or "").strip()
 
     clauses = ["created_at > ?"]
-    params: list[Any] = [limit]
+    params: list[Any] = [limit_dt]
 
     if q:
         like = f"%{q}%"
@@ -620,13 +617,48 @@ def get_recent_records(
     elif sf == "processing":
         clauses.append("(status = 'pending' OR status LIKE 'processing%')")
 
-    where = " AND ".join(clauses)
-    sql = f"SELECT * FROM records WHERE {where} ORDER BY created_at DESC"
+    return " AND ".join(clauses), params
 
+
+def count_recent_records(
+    owner: str = "",
+    days=7,
+    search="",
+    category="",
+    status_filter="",
+) -> int:
+    init_minutes_db(owner)
     path = minutes_db_path(owner)
+    purge_expired_minutes_db_path(path)
+    where, params = _recent_records_where_clause(days, search, category, status_filter)
+    sql = f"SELECT COUNT(*) FROM records WHERE {where}"
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(sql, params).fetchone()
+        return int(row[0]) if row else 0
+
+
+def get_recent_records(
+    owner: str = "",
+    days=7,
+    search="",
+    category="",
+    status_filter="",
+    limit: Optional[int] = None,
+    offset: int = 0,
+):
+    init_minutes_db(owner)
+    path = minutes_db_path(owner)
+    purge_expired_minutes_db_path(path)
+    where, params = _recent_records_where_clause(days, search, category, status_filter)
+    sql = f"SELECT * FROM records WHERE {where} ORDER BY created_at DESC"
+    qparams: list[Any] = list(params)
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        qparams.extend([limit, max(0, int(offset))])
+
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        return conn.execute(sql, params).fetchall()
+        return conn.execute(sql, qparams).fetchall()
 
 
 def get_active_queue_records(owner: str = "", days=7, limit=30):
