@@ -159,6 +159,24 @@ with st.sidebar:
         else ollama_default
     )
 
+    _whisper_labels = {
+        "高速（待ち時間を短くしがち）": "fast",
+        "標準（バランス）": "balanced",
+        "高精度（精度を優先・時間がかかりがち）": "accurate",
+    }
+    _whisper_choice = st.selectbox(
+        "音声認識の品質（Whisper）",
+        list(_whisper_labels.keys()),
+        index=1,
+        help=(
+            "動画・音声を Whisper で文字起こしするときの探索の強さです。"
+            "高精度にすると誤変換が減りやすい一方、GPU／CPU の負荷と待ち時間が伸びがちです。"
+            " .txt / .srt を直接渡す場合は使われません。"
+        ),
+        key="whisper_preset_ui",
+    )
+    whisper_preset = _whisper_labels[_whisper_choice]
+
     st.divider()
     st.markdown("### 議事録フォーマット（任意）")
     st.caption(
@@ -257,6 +275,7 @@ with st.sidebar:
                 "openai_model": openai_model,
                 "notification_type": ntype,
                 "transcript_only": transcript_only,
+                "whisper_preset": whisper_preset,
             }
             prompt_paths = save_uploaded_prompts(task_id, fmt_extract, fmt_merge)
             process_video_task.delay(
