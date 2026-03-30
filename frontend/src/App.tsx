@@ -40,6 +40,8 @@ import { jobStatusShortLabel, parseJobStatus } from "./jobStatus";
 import { HelpPage, clearHelpHash, openHelpHash, readHelpHash } from "./HelpPage";
 
 const LS_PENDING = "mm_pending_tasks";
+/** 議事録アーカイブ一覧の1ページあたり件数 */
+const ARCHIVE_PAGE_SIZE = 10;
 /** ワーカーがエラー破棄したレコードの summary 先頭（一覧の「エラー」フィルタと一致） */
 const TASK_ERROR_SUMMARY_PREFIX = "【処理エラー】";
 
@@ -1479,6 +1481,8 @@ function AppMain({
   const [presets, setPresets] = useState<Record<string, { label: string }>>({});
   const [presetId, setPresetId] = useState("standard");
   const [records, setRecords] = useState<RecordRow[]>([]);
+  const [archivePage, setArchivePage] = useState(1);
+  const [archiveTotal, setArchiveTotal] = useState(0);
   const [queue, setQueue] = useState<RecordRow[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>(loadPending);
   const errorNotifiedRef = useRef(new Set<string>());
@@ -1593,9 +1597,36 @@ function AppMain({
             : filterStatus === "破棄"
               ? "cancelled"
               : "processing";
-    const rows = await listRecords({ days: 7, search, category: cat, status_filter: st });
-    setRecords(rows);
-  }, [search, filterCat, filterStatus]);
+    const offset = (archivePage - 1) * ARCHIVE_PAGE_SIZE;
+    let res = await listRecords({
+      days: 7,
+      search,
+      category: cat,
+      status_filter: st,
+      limit: ARCHIVE_PAGE_SIZE,
+      offset,
+    });
+    const maxPage = Math.max(1, Math.ceil(res.total / ARCHIVE_PAGE_SIZE));
+    if (res.total === 0) {
+      setRecords([]);
+      setArchiveTotal(0);
+      if (archivePage !== 1) setArchivePage(1);
+      return;
+    }
+    if (archivePage > maxPage) {
+      setArchivePage(maxPage);
+      res = await listRecords({
+        days: 7,
+        search,
+        category: cat,
+        status_filter: st,
+        limit: ARCHIVE_PAGE_SIZE,
+        offset: (maxPage - 1) * ARCHIVE_PAGE_SIZE,
+      });
+    }
+    setRecords(res.items);
+    setArchiveTotal(res.total);
+  }, [search, filterCat, filterStatus, archivePage]);
 
   const refreshQueue = useCallback(async () => {
     setQueue(await getQueue());
@@ -2491,21 +2522,40 @@ function AppMain({
             ) : null}
           </div>
           <div className="filters filters--tight">
-            <input placeholder="キーワード検索" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
+            <input
+              placeholder="キーワード検索"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setArchivePage(1);
+              }}
+            />
+            <select
+              value={filterCat}
+              onChange={(e) => {
+                setFilterCat(e.target.value);
+                setArchivePage(1);
+              }}
+            >
               {["（すべて）", "未分類", "社内", "顧客・社外", "その他"].map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
               ))}
             </select>
-            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-            {["（すべて）", "完了", "エラー", "破棄", "処理中"].map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+            <select
+              value={filterStatus}
+              onChange={(e) => {
+                setFilterStatus(e.target.value);
+                setArchivePage(1);
+              }}
+            >
+              {["（すべて）", "完了", "エラー", "破棄", "処理中"].map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="main-archive-scroll">
@@ -2523,6 +2573,31 @@ function AppMain({
               ))
             )}
           </div>
+          {archiveTotal > ARCHIVE_PAGE_SIZE ? (
+            <div className="main-archive-pagination" role="navigation" aria-label="アーカイブのページ送り">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={archivePage <= 1}
+                onClick={() => setArchivePage((p) => Math.max(1, p - 1))}
+              >
+                前へ
+              </button>
+              <span className="main-archive-pagination-info">
+                {archivePage} / {Math.max(1, Math.ceil(archiveTotal / ARCHIVE_PAGE_SIZE))} ページ（全 {archiveTotal} 件）
+              </span>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={archivePage >= Math.ceil(archiveTotal / ARCHIVE_PAGE_SIZE)}
+                onClick={() =>
+                  setArchivePage((p) => Math.min(Math.max(1, Math.ceil(archiveTotal / ARCHIVE_PAGE_SIZE)), p + 1))
+                }
+              >
+                次へ
+              </button>
+            </div>
+          ) : null}
         </section>
       </main>
       </div>

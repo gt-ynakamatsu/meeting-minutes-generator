@@ -314,12 +314,16 @@ export async function listRecords(params: {
   search?: string;
   category?: string;
   status_filter?: string;
-}): Promise<RecordRow[]> {
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: RecordRow[]; total: number }> {
   const q = new URLSearchParams();
   if (params.days != null) q.set("days", String(params.days));
   if (params.search) q.set("search", params.search);
   if (params.category) q.set("category", params.category);
   if (params.status_filter) q.set("status_filter", params.status_filter);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.offset != null) q.set("offset", String(params.offset));
   const res = await apiFetch(`${PREFIX}/api/records?${q.toString()}`);
   return handle(res);
 }
