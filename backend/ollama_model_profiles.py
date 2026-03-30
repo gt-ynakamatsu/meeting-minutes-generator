@@ -68,10 +68,25 @@ BUILTIN_PROFILES: List[Dict[str, Any]] = [
         "match": "mistral",
         "repeat_penalty": 1.08,
     },
+    # Gemma は日本語の構造化抽出で「会話に無い項目」を足しがち。パラメータを締めて抑制を試みる（万能ではない）。
+    # 品質優先なら qwen2.5 / qwen3 の利用を推奨。
+    {
+        "match": "gemma3",
+        "extract_temperature": 0,
+        "merge_temperature": 0.1,
+        "top_p": 0.85,
+        "top_k": 40,
+        "repeat_penalty": 1.12,
+        "repeat_last_n": 128,
+    },
     {
         "match": "gemma",
-        "merge_temperature": 0.15,
+        "extract_temperature": 0,
+        "merge_temperature": 0.12,
+        "top_p": 0.88,
+        "top_k": 48,
         "repeat_penalty": 1.1,
+        "repeat_last_n": 96,
     },
 ]
 
