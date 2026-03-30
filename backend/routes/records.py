@@ -132,11 +132,21 @@ def export_transcript_md(task_id: str, _auth: ApiUser):
         raise HTTPException(status_code=404, detail="文字起こしはまだありません（処理のこの段階では取得できません）")
     base = os.path.basename(row["filename"] or "transcript")
     safe_base = base.rsplit(".", 1)[0] if "." in base else base
+    sum_raw = str(row["summary"] or "")
+    err_cancelled = st == "cancelled" and "【処理エラー】" in sum_raw
+    if err_cancelled:
+        note = (
+            "- 議事録の AI 推論（抽出・統合）でエラーが出たジョブですが、**文字起こしまで完了していた内容**を保存しています。\n"
+        )
+    else:
+        note = (
+            "- Whisper 等による自動文字起こしです。議事録の体裁整形・要約より先に保存した内容です。\n"
+        )
     header = (
-        "# 書き起こし（自動・処理途中）\n\n"
+        "# 書き起こし（自動）\n\n"
         f"- 元ファイル: {base}\n"
-        "- Whisper 等による自動文字起こしです。議事録の体裁整形・要約より先に保存した内容です。\n\n"
-        "---\n\n"
+        + note
+        + "\n---\n\n"
     )
     body = (header + str(text)).encode("utf-8")
     fn = f"transcript_{safe_base}.md"
