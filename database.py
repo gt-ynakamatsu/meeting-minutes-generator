@@ -325,6 +325,11 @@ def list_registry_users() -> list[dict[str, Any]]:
     return out
 
 
+def list_admin_emails() -> list[str]:
+    """管理者ユーザーのログイン名（メールアドレス形式）一覧。エラー報告の宛先に使う。"""
+    return [u["username"] for u in list_registry_users() if u.get("is_admin")]
+
+
 def bootstrap_registry_admin(username: str, password: str) -> None:
     """認証 DB にユーザーが 0 件のときだけ最初の管理者を 1 人登録する（並行リクエスト対策で IMMEDIATE ロック）。"""
     import bcrypt

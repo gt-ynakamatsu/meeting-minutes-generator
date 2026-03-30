@@ -1,5 +1,6 @@
 """ログイン・初回セットアップ・自己登録・セッション情報。"""
 
+import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException
@@ -16,11 +17,20 @@ from backend.schemas import AuthMeResponse, AuthStatusResponse, BootstrapRequest
 router = APIRouter(tags=["auth"])
 
 
+def _error_report_available() -> bool:
+    if not smtp_notify.smtp_configured():
+        return False
+    if auth_enabled():
+        return len(db.list_admin_emails()) > 0
+    return bool((os.getenv("MM_ERROR_REPORT_TO") or "").strip())
+
+
 @router.get("/api/auth/status", response_model=AuthStatusResponse)
 def auth_status():
     email_feat = feature_flags.email_notify_feature_enabled()
     email_ok = email_feat and smtp_notify.smtp_configured()
     oa = feature_flags.openai_feature_enabled()
+    er = _error_report_available()
     if not auth_enabled():
         return AuthStatusResponse(
             auth_required=False,
@@ -29,6 +39,7 @@ def auth_status():
             email_notify_feature_enabled=email_feat,
             email_notify_available=email_ok,
             openai_enabled=oa,
+            error_report_available=er,
         )
     n = db.count_users()
     return AuthStatusResponse(
@@ -38,6 +49,7 @@ def auth_status():
         email_notify_feature_enabled=email_feat,
         email_notify_available=email_ok,
         openai_enabled=oa,
+        error_report_available=er,
     )
 
 

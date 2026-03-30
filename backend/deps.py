@@ -45,3 +45,24 @@ def require_admin(user: Annotated[str, Depends(require_api_user)]) -> str:
 
 ApiUser = Annotated[str, Depends(require_api_user)]
 AdminUser = Annotated[str, Depends(require_admin)]
+
+
+def optional_api_user(
+    creds: Annotated[Optional[HTTPAuthorizationCredentials], Depends(_bearer)],
+) -> str:
+    """認証オフ時は常に空。認証オンでトークン欠如／不正のときも空（匿名扱い）。"""
+    if not auth_enabled():
+        return ""
+    if creds is None or not (creds.credentials or "").strip():
+        return ""
+    try:
+        payload = decode_access_token(creds.credentials.strip())
+        sub = payload.get("sub")
+        if not isinstance(sub, str) or not sub.strip():
+            return ""
+        return sub.strip()
+    except Exception:
+        return ""
+
+
+OptionalApiUser = Annotated[str, Depends(optional_api_user)]

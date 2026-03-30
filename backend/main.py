@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import database as db
 from backend.auth_settings import auth_enabled
-from backend.routes import admin, auth, jobs, meta, presets, profile, records
+from backend.routes import admin, auth, feedback, jobs, meta, presets, profile, records
 
 _origins = os.getenv(
     "CORS_ORIGINS",
@@ -44,5 +44,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (meta, auth, admin, profile, presets, jobs, records):
+for r in (meta, auth, admin, feedback, profile, presets, jobs, records):
     app.include_router(r.router)
