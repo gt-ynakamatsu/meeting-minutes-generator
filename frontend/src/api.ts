@@ -294,6 +294,77 @@ export async function adminDeleteUser(loginEmail: string): Promise<{ ok: boolean
   return handle(res);
 }
 
+export type UsageCountPct = { count: number; pct: number };
+
+export type AdminUsageSummary = {
+  period_days: number;
+  total_submissions: number;
+  pipeline_minutes_llm: UsageCountPct;
+  pipeline_transcript_only: UsageCountPct;
+  provider_ollama: UsageCountPct;
+  provider_openai: UsageCountPct;
+  ollama_models_for_llm_jobs: { model: string; count: number; pct: number }[];
+  openai_models_for_llm_jobs: { model: string; count: number; pct: number }[];
+  whisper_presets_for_media: { preset: string; count: number; pct: number }[];
+  media_kind_breakdown: { kind: string; count: number; pct: number }[];
+};
+
+export type UsageEventRow = {
+  id: number;
+  created_at: string;
+  task_id: string;
+  user_email: string;
+  transcript_only: boolean;
+  llm_provider: string;
+  model_name: string;
+  whisper_preset: string;
+  media_kind: string;
+};
+
+export type UsageAdminNoteRow = {
+  id: number;
+  created_at: string;
+  author_email: string;
+  body: string;
+};
+
+export async function adminUsageSummary(days: number): Promise<AdminUsageSummary> {
+  const q = new URLSearchParams({ days: String(days) });
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/summary?${q.toString()}`);
+  return handle(res);
+}
+
+export async function adminUsageEvents(params: {
+  days: number;
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: UsageEventRow[]; total: number }> {
+  const q = new URLSearchParams({ days: String(params.days) });
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.offset != null) q.set("offset", String(params.offset));
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/events?${q.toString()}`);
+  return handle(res);
+}
+
+export async function adminUsageNotesList(): Promise<UsageAdminNoteRow[]> {
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/notes`);
+  return handle(res);
+}
+
+export async function adminUsageNoteAdd(body: string): Promise<UsageAdminNoteRow> {
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body }),
+  });
+  return handle(res);
+}
+
+export async function adminUsageNoteDelete(noteId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/notes/${noteId}`, { method: "DELETE" });
+  return handle(res);
+}
+
 export async function getVersion(): Promise<{ version: string }> {
   const res = await fetch(`${PREFIX}/api/version`);
   return handle(res);

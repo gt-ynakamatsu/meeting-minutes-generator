@@ -136,3 +136,67 @@ class RecordsPageResponse(BaseModel):
 
     items: list[dict[str, Any]]
     total: int
+
+
+class UsageCountPct(BaseModel):
+    count: int = 0
+    pct: float = 0.0
+
+
+class UsageModelBreakdownRow(BaseModel):
+    model: str
+    count: int
+    pct: float
+
+
+class UsagePresetBreakdownRow(BaseModel):
+    preset: str
+    count: int
+    pct: float
+
+
+class UsageMediaKindRow(BaseModel):
+    kind: str
+    count: int
+    pct: float
+
+
+class AdminUsageSummaryResponse(BaseModel):
+    period_days: int
+    total_submissions: int
+    pipeline_minutes_llm: UsageCountPct
+    pipeline_transcript_only: UsageCountPct
+    provider_ollama: UsageCountPct
+    provider_openai: UsageCountPct
+    ollama_models_for_llm_jobs: list[UsageModelBreakdownRow]
+    openai_models_for_llm_jobs: list[UsageModelBreakdownRow]
+    whisper_presets_for_media: list[UsagePresetBreakdownRow]
+    media_kind_breakdown: list[UsageMediaKindRow]
+
+
+class UsageEventRow(BaseModel):
+    id: int
+    created_at: str
+    task_id: str
+    user_email: str
+    transcript_only: bool
+    llm_provider: str
+    model_name: str
+    whisper_preset: str
+    media_kind: str
+
+
+class AdminUsageEventsResponse(BaseModel):
+    items: list[UsageEventRow]
+    total: int
+
+
+class UsageAdminNoteRow(BaseModel):
+    id: int
+    created_at: str
+    author_email: str
+    body: str
+
+
+class UsageAdminNoteCreate(BaseModel):
+    body: str = Field(default="", min_length=1, max_length=8000)

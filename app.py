@@ -6,6 +6,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import database as db
 import feature_flags
+from backend.auth_settings import auth_enabled
 from backend.presets_io import preset_options_for_ui
 from tasks import process_video_task
 from version import __version__
@@ -264,6 +265,19 @@ with st.sidebar:
                 context_json=context_json,
                 transcript_only=transcript_only,
             )
+
+            if auth_enabled():
+                prov = "openai" if llm_provider == "OpenAI API" else "ollama"
+                model_name = (openai_model if llm_provider == "OpenAI API" else ollama_model) or ""
+                db.record_usage_job_submission(
+                    task_id,
+                    (email or "").strip(),
+                    transcript_only,
+                    prov,
+                    model_name.strip(),
+                    whisper_preset=whisper_preset,
+                    original_filename=uploaded_file.name,
+                )
 
             ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(
                 notification_type, "browser"

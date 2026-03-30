@@ -118,6 +118,22 @@ async def create_task(
         transcript_only=bool(meta.transcript_only),
     )
 
+    if auth_enabled() and owner:
+        model_for_log = (
+            (openai_model or meta.openai_model or "gpt-4o-mini").strip()
+            if meta.llm_provider == "openai"
+            else (meta.ollama_model or "").strip()
+        )
+        db.record_usage_job_submission(
+            task_id,
+            owner,
+            bool(meta.transcript_only),
+            meta.llm_provider,
+            model_for_log,
+            whisper_preset=(meta.whisper_preset or "balanced"),
+            original_filename=safe_name,
+        )
+
     whisper_bundle = {"whisper_preset": meta.whisper_preset}
 
     if meta.llm_provider == "openai":

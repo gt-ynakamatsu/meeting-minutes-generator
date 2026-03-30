@@ -140,6 +140,36 @@ def _migrate_registry_is_admin(conn):
     conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_usage_tables(conn):
+    """管理者向け利用ログ（議事録本文は保存しない）。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_job_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_id TEXT NOT NULL UNIQUE,
+            user_email TEXT NOT NULL DEFAULT '',
+            transcript_only INTEGER NOT NULL,
+            llm_provider TEXT NOT NULL,
+            model_name TEXT NOT NULL DEFAULT '',
+            whisper_preset TEXT NOT NULL DEFAULT 'balanced',
+            media_kind TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_admin_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            author_email TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_job_log_created ON usage_job_log(created_at)")
+
+
 def _ensure_at_least_one_admin(conn):
     """管理者が 1 人もいなければ、最古のユーザーを管理者にする（レガシー移行直後など）。"""
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
@@ -220,6 +250,7 @@ def init_registry_db():
     with sqlite3.connect(REGISTRY_DB_PATH) as conn:
         _ensure_at_least_one_admin(conn)
         _try_bootstrap_admin_registry(conn)
+        _migrate_usage_tables(conn)
 
 
 def init_db():
@@ -703,3 +734,256 @@ def parse_context_json(row):
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+def usage_media_kind_from_filename(filename: str) -> str:
+    """拡張子のみから媒体種別（ファイル名全文はログに保存しない）。"""
+    base = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if "." not in base:
+        return "other"
+    ext = base.rsplit(".", 1)[-1].lower()
+    if ext in ("mp4", "mov", "webm", "mkv", "avi"):
+        return "video"
+    if ext in ("mp3", "m4a", "wav", "flac", "ogg", "aac"):
+        return "audio"
+    if ext == "srt":
+        return "srt"
+    if ext == "txt":
+        return "txt"
+    return "other"
+
+
+def record_usage_job_submission(
+    task_id: str,
+    user_email: str,
+    transcript_only: bool,
+    llm_provider: str,
+    model_name: str,
+    whisper_preset: str = "balanced",
+    original_filename: str = "",
+) -> None:
+    """認証が有効なときのみ registry に 1 行記録（タスク投入時）。議事録・書き起こし本文は含めない。"""
+    if not _auth_secret_configured():
+        return
+    init_registry_db()
+    if not os.path.exists(REGISTRY_DB_PATH):
+        return
+    tid = (task_id or "").strip()
+    if not tid:
+        return
+    user_key = registry_login_normalize(user_email) if (user_email or "").strip() else ""
+    prov = (llm_provider or "").strip().lower()
+    if prov not in ("ollama", "openai"):
+        prov = "ollama"
+    model = (model_name or "").strip()
+    if not model:
+        model = "gpt-4o-mini" if prov == "openai" else ""
+    wp = (whisper_preset or "balanced").strip() or "balanced"
+    mk = usage_media_kind_from_filename(original_filename)
+    try:
+        with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO usage_job_log
+                (task_id, user_email, transcript_only, llm_provider, model_name, whisper_preset, media_kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tid, user_key, 1 if transcript_only else 0, prov, model, wp, mk),
+            )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _usage_pct(part: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(1000.0 * part / total) / 10.0
+
+
+def admin_usage_summary(days: int) -> dict[str, Any]:
+    """管理者向け集計。直近 days 日の投入ログ（期間は最大 365 日）。"""
+    days = max(1, min(365, int(days)))
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return {
+            "period_days": days,
+            "total_submissions": 0,
+            "pipeline_minutes_llm": {"count": 0, "pct": 0.0},
+            "pipeline_transcript_only": {"count": 0, "pct": 0.0},
+            "provider_ollama": {"count": 0, "pct": 0.0},
+            "provider_openai": {"count": 0, "pct": 0.0},
+            "ollama_models_for_llm_jobs": [],
+            "openai_models_for_llm_jobs": [],
+            "whisper_presets_for_media": [],
+            "media_kind_breakdown": [],
+        }
+    init_registry_db()
+    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_s = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT transcript_only, llm_provider, model_name, whisper_preset, media_kind
+            FROM usage_job_log
+            WHERE created_at >= ?
+            """,
+            (cutoff_s,),
+        ).fetchall()
+    total = len(rows)
+    n_llm = sum(1 for r in rows if not r[0])
+    n_tr = total - n_llm
+    n_ollama = sum(1 for r in rows if (r[1] or "").lower() == "ollama")
+    n_openai = sum(1 for r in rows if (r[1] or "").lower() == "openai")
+
+    ollama_llm_counts: dict[str, int] = {}
+    openai_llm_counts: dict[str, int] = {}
+    n_ollama_llm = 0
+    n_openai_llm = 0
+    for r in rows:
+        if r[0]:
+            continue
+        prov = (r[1] or "").lower()
+        m = (r[2] or "").strip() or "(未指定)"
+        if prov == "ollama":
+            n_ollama_llm += 1
+            ollama_llm_counts[m] = ollama_llm_counts.get(m, 0) + 1
+        elif prov == "openai":
+            n_openai_llm += 1
+            openai_llm_counts[m] = openai_llm_counts.get(m, 0) + 1
+    ollama_models_list = sorted(ollama_llm_counts.items(), key=lambda x: (-x[1], x[0]))
+    openai_models_list = sorted(openai_llm_counts.items(), key=lambda x: (-x[1], x[0]))
+    ollama_models_for_llm = [
+        {"model": name, "count": c, "pct": _usage_pct(c, n_ollama_llm)} for name, c in ollama_models_list
+    ]
+    openai_models_for_llm = [
+        {"model": name, "count": c, "pct": _usage_pct(c, n_openai_llm)} for name, c in openai_models_list
+    ]
+
+    whisper_rows = [r for r in rows if r[4] in ("video", "audio")]
+    wtotal = len(whisper_rows)
+    wp_counts: dict[str, int] = {}
+    for r in whisper_rows:
+        w = (r[3] or "balanced").strip() or "balanced"
+        wp_counts[w] = wp_counts.get(w, 0) + 1
+    wp_list = sorted(wp_counts.items(), key=lambda x: (-x[1], x[0]))
+    whisper_presets = [
+        {"preset": p, "count": c, "pct": _usage_pct(c, wtotal)} for p, c in wp_list
+    ]
+
+    mk_counts: dict[str, int] = {}
+    for r in rows:
+        k = r[4] or "other"
+        mk_counts[k] = mk_counts.get(k, 0) + 1
+    mk_list = sorted(mk_counts.items(), key=lambda x: (-x[1], x[0]))
+    media_breakdown = [{"kind": k, "count": c, "pct": _usage_pct(c, total)} for k, c in mk_list]
+
+    return {
+        "period_days": days,
+        "total_submissions": total,
+        "pipeline_minutes_llm": {"count": n_llm, "pct": _usage_pct(n_llm, total)},
+        "pipeline_transcript_only": {"count": n_tr, "pct": _usage_pct(n_tr, total)},
+        "provider_ollama": {"count": n_ollama, "pct": _usage_pct(n_ollama, total)},
+        "provider_openai": {"count": n_openai, "pct": _usage_pct(n_openai, total)},
+        "ollama_models_for_llm_jobs": ollama_models_for_llm,
+        "openai_models_for_llm_jobs": openai_models_for_llm,
+        "whisper_presets_for_media": whisper_presets,
+        "media_kind_breakdown": media_breakdown,
+    }
+
+
+def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+    """直近のイベント一覧と総件数（ページング用）。期間は最大 365 日。"""
+    days = max(1, min(365, int(days)))
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return [], 0
+    init_registry_db()
+    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_s = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM usage_job_log WHERE created_at >= ?",
+                (cutoff_s,),
+            ).fetchone()[0]
+        )
+        cur = conn.execute(
+            """
+            SELECT id, created_at, task_id, user_email, transcript_only, llm_provider, model_name,
+                   whisper_preset, media_kind
+            FROM usage_job_log
+            WHERE created_at >= ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (cutoff_s, limit, offset),
+        )
+        items = []
+        for row in cur.fetchall():
+            items.append(
+                {
+                    "id": row["id"],
+                    "created_at": str(row["created_at"]) if row["created_at"] is not None else "",
+                    "task_id": row["task_id"],
+                    "user_email": row["user_email"] or "",
+                    "transcript_only": bool(row["transcript_only"]),
+                    "llm_provider": row["llm_provider"],
+                    "model_name": row["model_name"] or "",
+                    "whisper_preset": row["whisper_preset"] or "",
+                    "media_kind": row["media_kind"] or "",
+                }
+            )
+    return items, total
+
+
+def usage_admin_notes_list(limit: int = 80) -> list[dict[str, Any]]:
+    limit = max(1, min(200, int(limit)))
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return []
+    init_registry_db()
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT id, created_at, author_email, body
+            FROM usage_admin_notes
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "id": r["id"],
+                "created_at": str(r["created_at"]) if r["created_at"] is not None else "",
+                "author_email": r["author_email"] or "",
+                "body": r["body"] or "",
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def usage_admin_note_add(author_email: str, body: str) -> Optional[int]:
+    text = (body or "").strip()
+    if not text:
+        return None
+    if not _auth_secret_configured():
+        return None
+    init_registry_db()
+    auth = registry_login_normalize(author_email) if (author_email or "").strip() else ""
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT INTO usage_admin_notes (author_email, body) VALUES (?, ?)",
+            (auth, text),
+        )
+        return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+
+def usage_admin_note_delete(note_id: int) -> bool:
+    if not _auth_secret_configured():
+        return False
+    init_registry_db()
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        cur = conn.execute("DELETE FROM usage_admin_notes WHERE id = ?", (int(note_id),))
+        return cur.rowcount > 0

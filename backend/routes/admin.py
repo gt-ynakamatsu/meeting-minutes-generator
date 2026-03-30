@@ -2,11 +2,25 @@
 
 import sqlite3
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 import database as db
 from backend.deps import AdminUser
-from backend.schemas import AdminCreateUserRequest, AdminPasswordResetRequest, AdminRolePatch, AdminUserRow
+from backend.schemas import (
+    AdminCreateUserRequest,
+    AdminPasswordResetRequest,
+    AdminRolePatch,
+    AdminUsageEventsResponse,
+    AdminUsageSummaryResponse,
+    AdminUserRow,
+    UsageAdminNoteCreate,
+    UsageAdminNoteRow,
+    UsageCountPct,
+    UsageEventRow,
+    UsageMediaKindRow,
+    UsageModelBreakdownRow,
+    UsagePresetBreakdownRow,
+)
 
 router = APIRouter(tags=["admin"])
 
@@ -86,4 +100,64 @@ def admin_delete_user(login_email: str, _admin: AdminUser):
         raise HTTPException(status_code=404, detail="ユーザーが見つかりません") from None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True}
+
+
+def _usage_summary_model(data: dict) -> AdminUsageSummaryResponse:
+    return AdminUsageSummaryResponse(
+        period_days=int(data["period_days"]),
+        total_submissions=int(data["total_submissions"]),
+        pipeline_minutes_llm=UsageCountPct(**data["pipeline_minutes_llm"]),
+        pipeline_transcript_only=UsageCountPct(**data["pipeline_transcript_only"]),
+        provider_ollama=UsageCountPct(**data["provider_ollama"]),
+        provider_openai=UsageCountPct(**data["provider_openai"]),
+        ollama_models_for_llm_jobs=[UsageModelBreakdownRow(**x) for x in data["ollama_models_for_llm_jobs"]],
+        openai_models_for_llm_jobs=[UsageModelBreakdownRow(**x) for x in data["openai_models_for_llm_jobs"]],
+        whisper_presets_for_media=[UsagePresetBreakdownRow(**x) for x in data["whisper_presets_for_media"]],
+        media_kind_breakdown=[UsageMediaKindRow(**x) for x in data["media_kind_breakdown"]],
+    )
+
+
+@router.get("/api/admin/usage/summary", response_model=AdminUsageSummaryResponse)
+def admin_usage_summary(_admin: AdminUser, days: int = Query(30, ge=1, le=365)):
+    raw = db.admin_usage_summary(days)
+    return _usage_summary_model(raw)
+
+
+@router.get("/api/admin/usage/events", response_model=AdminUsageEventsResponse)
+def admin_usage_events(
+    _admin: AdminUser,
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(80, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    items, total = db.admin_usage_events(days, limit=limit, offset=offset)
+    return AdminUsageEventsResponse(
+        items=[UsageEventRow(**x) for x in items],
+        total=total,
+    )
+
+
+@router.get("/api/admin/usage/notes", response_model=list[UsageAdminNoteRow])
+def admin_usage_notes_list(_admin: AdminUser):
+    rows = db.usage_admin_notes_list()
+    return [UsageAdminNoteRow(**r) for r in rows]
+
+
+@router.post("/api/admin/usage/notes", response_model=UsageAdminNoteRow)
+def admin_usage_notes_add(body: UsageAdminNoteCreate, admin: AdminUser):
+    nid = db.usage_admin_note_add(admin, body.body)
+    if nid is None:
+        raise HTTPException(status_code=400, detail="メモを保存できませんでした")
+    rows = db.usage_admin_notes_list(limit=200)
+    for r in rows:
+        if r["id"] == nid:
+            return UsageAdminNoteRow(**r)
+    raise HTTPException(status_code=500, detail="作成後の取得に失敗しました")
+
+
+@router.delete("/api/admin/usage/notes/{note_id}")
+def admin_usage_notes_delete(note_id: int, _admin: AdminUser):
+    if not db.usage_admin_note_delete(note_id):
+        raise HTTPException(status_code=404, detail="メモが見つかりません")
     return {"ok": True}

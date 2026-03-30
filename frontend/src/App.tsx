@@ -8,6 +8,11 @@ import {
   adminListUsers,
   adminResetPassword,
   adminSetRole,
+  adminUsageEvents,
+  adminUsageNoteAdd,
+  adminUsageNoteDelete,
+  adminUsageNotesList,
+  adminUsageSummary,
   bootstrapRequest,
   createTask,
   discardRecord,
@@ -30,11 +35,14 @@ import {
   patchSummary,
   setStoredToken,
   submitErrorReport,
+  type AdminUsageSummary,
   type AdminUserRow,
   type AuthMe,
   type AuthStatus,
   type RecordRow,
   type TaskSubmitMetadata,
+  type UsageAdminNoteRow,
+  type UsageEventRow,
 } from "./api";
 import { jobStatusShortLabel, parseJobStatus } from "./jobStatus";
 import { HelpPage, clearHelpHash, openHelpHash, readHelpHash } from "./HelpPage";
@@ -1131,6 +1139,374 @@ function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
   );
 }
 
+const USAGE_EVENT_PAGE = 50;
+
+function AdminUsagePanel() {
+  const [days, setDays] = useState(30);
+  const [summary, setSummary] = useState<AdminUsageSummary | null>(null);
+  const [events, setEvents] = useState<UsageEventRow[]>([]);
+  const [eventsTotal, setEventsTotal] = useState(0);
+  const [notes, setNotes] = useState<UsageAdminNoteRow[]>([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const loadSummaryAndNotes = useCallback(() => {
+    setErr(null);
+    return Promise.all([adminUsageSummary(days), adminUsageNotesList()])
+      .then(([s, n]) => {
+        setSummary(s);
+        setNotes(n);
+      })
+      .catch((e) => {
+        setErr(String(e));
+      });
+  }, [days]);
+
+  const loadEvents = useCallback((offset: number, append: boolean) => {
+    setErr(null);
+    return adminUsageEvents({ days, limit: USAGE_EVENT_PAGE, offset })
+      .then((ev) => {
+        setEventsTotal(ev.total);
+        if (append) {
+          setEvents((prev) => [...prev, ...ev.items]);
+        } else {
+          setEvents(ev.items);
+        }
+      })
+      .catch((e) => {
+        setErr(String(e));
+      });
+  }, [days]);
+
+  useEffect(() => {
+    void loadSummaryAndNotes();
+  }, [loadSummaryAndNotes]);
+
+  useEffect(() => {
+    void loadEvents(0, false);
+  }, [days, loadEvents]);
+
+  const mediaKindLabel = (k: string) => {
+    const m: Record<string, string> = {
+      video: "動画",
+      audio: "音声",
+      srt: "SRT",
+      txt: "テキスト",
+      other: "その他",
+    };
+    return m[k] || k || "—";
+  };
+
+  return (
+    <>
+      <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
+        認証が有効な環境で、ジョブがキューに載ったタイミングの統計です。議事録本文・書き起こし全文・ファイル名の保存は行いません（拡張子から推定した媒体種別のみ）。
+        集計期間の上限は <strong>365 日（1 年）</strong>です。経営・インフラ判断向けに、下のメモに所見を残せます。
+      </p>
+      {err ? <p className="error-box">{err}</p> : null}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center", marginBottom: "1rem" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
+          集計期間
+          <select
+            value={days}
+            onChange={(e) => {
+              setDays(Number(e.target.value));
+              e.currentTarget.blur();
+            }}
+          >
+            <option value={7}>直近 7 日</option>
+            <option value={30}>直近 30 日</option>
+            <option value={90}>直近 90 日</option>
+            <option value={365}>直近 365 日（1 年・上限）</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => {
+            void loadSummaryAndNotes().then(() => loadEvents(0, false));
+          }}
+        >
+          再読み込み
+        </button>
+      </div>
+
+      {summary ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+          <section>
+            <h3 style={{ margin: "0 0 0.5rem" }}>サマリ</h3>
+            <p style={{ margin: "0 0 0.5rem" }}>
+              <strong>総投入件数:</strong> {summary.total_submissions} 件（期間 {summary.period_days} 日）
+            </p>
+            <ul style={{ margin: 0, paddingLeft: "1.2rem", lineHeight: 1.6 }}>
+              <li>
+                議事録まで（LLM 推論あり）: {summary.pipeline_minutes_llm.count} 件（
+                {summary.pipeline_minutes_llm.pct}%）
+              </li>
+              <li>
+                書き起こしのみ: {summary.pipeline_transcript_only.count} 件（{summary.pipeline_transcript_only.pct}%）
+              </li>
+              <li>
+                Ollama: {summary.provider_ollama.count} 件（{summary.provider_ollama.pct}%） / OpenAI:{" "}
+                {summary.provider_openai.count} 件（{summary.provider_openai.pct}%）
+              </li>
+            </ul>
+          </section>
+
+          {summary.ollama_models_for_llm_jobs.length > 0 ? (
+            <section>
+              <h3 style={{ margin: "0 0 0.5rem" }}>Ollama モデル（議事録生成ジョブのみ）</h3>
+              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+                割合は、Ollama で議事録生成まで行ったジョブ件数に対する内訳です。
+              </p>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>モデル</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.ollama_models_for_llm_jobs.map((r) => (
+                      <tr key={r.model} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                        <td style={{ padding: "0.35rem 0" }}>
+                          <code>{r.model}</code>
+                        </td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
+          {summary.openai_models_for_llm_jobs.length > 0 ? (
+            <section>
+              <h3 style={{ margin: "0 0 0.5rem" }}>OpenAI モデル（議事録生成ジョブのみ）</h3>
+              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+                割合は、OpenAI で議事録生成まで行ったジョブ件数に対する内訳です。
+              </p>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>モデル</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.openai_models_for_llm_jobs.map((r) => (
+                      <tr key={r.model} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                        <td style={{ padding: "0.35rem 0" }}>
+                          <code>{r.model}</code>
+                        </td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
+          {summary.whisper_presets_for_media.length > 0 ? (
+            <section>
+              <h3 style={{ margin: "0 0 0.5rem" }}>Whisper 品質プリセット（動画・音声ジョブのみ）</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>プリセット</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.whisper_presets_for_media.map((r) => (
+                      <tr key={r.preset} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                        <td style={{ padding: "0.35rem 0" }}>{r.preset}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
+          {summary.media_kind_breakdown.length > 0 ? (
+            <section>
+              <h3 style={{ margin: "0 0 0.5rem" }}>投入ファイルの種別（拡張子から推定）</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>種別</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
+                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.media_kind_breakdown.map((r) => (
+                      <tr key={r.kind} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                        <td style={{ padding: "0.35rem 0" }}>{mediaKindLabel(r.kind)}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
+                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+        </div>
+      ) : (
+        <p className="muted">読み込み中…</p>
+      )}
+
+      <section style={{ marginTop: "1.75rem" }}>
+        <h3 style={{ margin: "0 0 0.5rem" }}>直近の投入イベント</h3>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+          タスク ID・ログイン ID（メール）・設定の要約のみ。本文は含みません。
+        </p>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>日時</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>ユーザー</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>パイプライン</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>LLM</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>モデル</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>媒体</th>
+                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>Whisper</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((ev) => (
+                <tr key={`${ev.id}-${ev.task_id}`} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                  <td style={{ padding: "0.35rem 0.25rem", whiteSpace: "nowrap" }}>{ev.created_at}</td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>
+                    <code>{ev.user_email || "—"}</code>
+                  </td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.transcript_only ? "書き起こしのみ" : "議事録まで"}</td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.llm_provider}</td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>
+                    <code>{ev.model_name || "—"}</code>
+                  </td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>{mediaKindLabel(ev.media_kind)}</td>
+                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.whisper_preset || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {events.length < eventsTotal ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "0.5rem" }}
+            onClick={() => {
+              void loadEvents(events.length, true);
+            }}
+          >
+            さらに読む（{events.length} / {eventsTotal}）
+          </button>
+        ) : events.length > 0 ? (
+          <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
+            全 {eventsTotal} 件を表示しています。
+          </p>
+        ) : (
+          <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
+            この期間のログはまだありません。
+          </p>
+        )}
+      </section>
+
+      <section style={{ marginTop: "1.75rem" }}>
+        <h3 style={{ margin: "0 0 0.5rem" }}>運用メモ（経営・サーバ強化の根拠など）</h3>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+          管理者のみが閲覧・追記できます。時系列で残ります。
+        </p>
+        <textarea
+          value={noteDraft}
+          onChange={(e) => setNoteDraft(e.target.value)}
+          rows={4}
+          style={{ width: "100%", boxSizing: "border-box", marginBottom: "0.5rem" }}
+          placeholder="例: 3月は動画比率が増加。GPU メモリ不足の問い合わせ n 件…"
+        />
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={busy || !noteDraft.trim()}
+          onClick={() => {
+            setBusy(true);
+            setErr(null);
+            void (async () => {
+              try {
+                await adminUsageNoteAdd(noteDraft.trim());
+                setNoteDraft("");
+                const n = await adminUsageNotesList();
+                setNotes(n);
+              } catch (e) {
+                setErr(String(e));
+              } finally {
+                setBusy(false);
+              }
+            })();
+          }}
+        >
+          メモを追加
+        </button>
+        <ul style={{ listStyle: "none", padding: 0, margin: "1rem 0 0" }}>
+          {notes.map((n) => (
+            <li
+              key={n.id}
+              style={{
+                borderBottom: "1px solid var(--border, #eee)",
+                padding: "0.65rem 0",
+                fontSize: "0.88rem",
+              }}
+            >
+              <div className="muted" style={{ fontSize: "0.8rem", marginBottom: "0.25rem" }}>
+                {n.created_at} · <code>{n.author_email || "—"}</code>
+              </div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{n.body}</div>
+              <button
+                type="button"
+                className="btn-link"
+                style={{ color: "var(--danger, #b00)", marginTop: "0.35rem" }}
+                onClick={() => {
+                  if (!window.confirm("このメモを削除しますか？")) return;
+                  void (async () => {
+                    try {
+                      await adminUsageNoteDelete(n.id);
+                      setNotes((prev) => prev.filter((x) => x.id !== n.id));
+                    } catch (e) {
+                      setErr(String(e));
+                    }
+                  })();
+                }}
+              >
+                削除
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </>
+  );
+}
+
 function LoginPanel({
   onSuccess,
   selfRegisterAllowed,
@@ -1475,7 +1851,7 @@ function AppMain({
   onLogout: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"general" | "admin">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "admin" | "usage">("general");
   const [authMe, setAuthMe] = useState<AuthMe | null>(null);
   const [version, setVersion] = useState("");
   const [presets, setPresets] = useState<Record<string, { label: string }>>({});
@@ -2047,6 +2423,14 @@ function AppMain({
                           setSettingsOpen(true);
                         },
                       },
+                      {
+                        key: "usage",
+                        label: "利用状況・ログ",
+                        onClick: () => {
+                          setSettingsTab("usage");
+                          setSettingsOpen(true);
+                        },
+                      },
                     ]
                   : []),
                 showLogout
@@ -2610,7 +2994,13 @@ function AppMain({
         open={settingsOpen}
         onClose={closeSettings}
         title={
-          serverOpenaiMode && authMe?.is_admin && settingsTab === "admin" ? "ユーザー・権限管理" : "設定"
+          serverOpenaiMode && authMe?.is_admin
+            ? settingsTab === "admin"
+              ? "ユーザー・権限管理"
+              : settingsTab === "usage"
+                ? "利用状況・ログ"
+                : "設定"
+            : "設定"
         }
       >
         {serverOpenaiMode && authMe?.is_admin ? (
@@ -2633,10 +3023,19 @@ function AppMain({
             >
               ユーザー・権限
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "usage"}
+              className={`settings-drawer-tab${settingsTab === "usage" ? " settings-drawer-tab--active" : ""}`}
+              onClick={() => setSettingsTab("usage")}
+            >
+              利用状況
+            </button>
           </div>
         ) : null}
 
-        {settingsTab === "general" || !serverOpenaiMode || !authMe?.is_admin ? (
+        {!serverOpenaiMode || !authMe?.is_admin || settingsTab === "general" ? (
           <>
             {serverOpenaiMode ? (
               <section className="settings-section">
@@ -2840,6 +3239,12 @@ function AppMain({
         {settingsTab === "admin" && serverOpenaiMode && authMe?.is_admin ? (
           <section className="settings-section">
             <AdminUserPanel selfEmail={authMe.email} />
+          </section>
+        ) : null}
+
+        {settingsTab === "usage" && serverOpenaiMode && authMe?.is_admin ? (
+          <section className="settings-section">
+            <AdminUsagePanel />
           </section>
         ) : null}
       </SettingsDrawer>
