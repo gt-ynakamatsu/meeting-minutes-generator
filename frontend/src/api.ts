@@ -44,6 +44,8 @@ export interface TaskSubmitMetadata {
   context: MeetingContext;
   /** true のとき書き起こしまで（Whisper または .txt/.srt）。議事録用 LLM は使わない */
   transcript_only?: boolean;
+  /** 動画・音声の Whisper 文字起こしの探索の強さ（既定 balanced） */
+  whisper_preset?: "fast" | "balanced" | "accurate";
 }
 
 export interface RecordRow {
@@ -81,6 +83,8 @@ export interface AuthStatus {
   email_notify_available?: boolean;
   /** MM_OPENAI_ENABLED がオフのとき false（未対応 API では undefined = 従来どおり表示） */
   openai_enabled?: boolean;
+  /** SMTP 済みかつ管理者宛先あり（または MM_ERROR_REPORT_TO）のとき true */
+  error_report_available?: boolean;
 }
 
 export interface AuthMe {
@@ -177,6 +181,20 @@ async function handle<T>(res: Response): Promise<T> {
 
 export async function getAuthStatus(): Promise<AuthStatus> {
   const res = await fetch(`${PREFIX}/api/auth/status`);
+  return handle(res);
+}
+
+export async function submitErrorReport(body: {
+  message: string;
+  detail?: string;
+  page_url?: string;
+  client_version?: string;
+}): Promise<{ ok: boolean; sent_to_count?: number }> {
+  const res = await apiFetch(`${PREFIX}/api/feedback/error-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return handle(res);
 }
 

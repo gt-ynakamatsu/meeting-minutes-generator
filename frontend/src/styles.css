@@ -1239,3 +1239,66 @@ body {
   display: inline-block;
   min-width: 8rem;
 }
+
+/* 解析設定: Whisper 品質 — ホバー／フォーカス時に説明パネル */
+.mm-whisper-settings-wrap {
+  position: relative;
+  margin: 0 0 1.1rem;
+  padding: 0.65rem 0.75rem 0.5rem;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  outline: none;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.mm-whisper-settings-wrap:hover,
+.mm-whisper-settings-wrap:focus-within {
+  border-color: var(--border);
+  box-shadow: 0 0 0 1px rgba(27, 67, 50, 0.07);
+}
+
+.mm-whisper-settings-label {
+  margin-top: 0 !important;
+}
+
+.mm-whisper-footnote {
+  font-size: 0.8rem;
+  margin: 0.35rem 0 0;
+  line-height: 1.45;
+}
+
+.mm-whisper-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--surface-elevated, var(--card, #fff));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    visibility 0.18s ease;
+}
+
+.mm-whisper-settings-wrap:hover .mm-whisper-hint,
+.mm-whisper-settings-wrap:focus-within .mm-whisper-hint {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.mm-whisper-hint code {
+  font-size: 0.88em;
+}

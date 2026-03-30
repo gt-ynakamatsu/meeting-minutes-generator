@@ -29,6 +29,7 @@ import {
   patchMeLlm,
   patchSummary,
   setStoredToken,
+  submitErrorReport,
   type AdminUserRow,
   type AuthMe,
   type AuthStatus,
@@ -46,6 +47,46 @@ function taskErrorDetailFromSummary(raw: string): string {
   if (!t.startsWith(TASK_ERROR_SUMMARY_PREFIX)) return t;
   const rest = t.slice(TASK_ERROR_SUMMARY_PREFIX.length).replace(/^\s*\n?/, "").trim();
   return rest || t;
+}
+
+function recordHasPersistedTranscript(row: RecordRow): boolean {
+  const t = row.transcript;
+  return t != null && String(t).trim().length > 0;
+}
+
+/** 議事録生成エラーでも Whisper 済みなら書き起こしだけ取得できるようにする */
+function TranscriptRecoveryActions({ row }: { row: RecordRow }) {
+  if (!recordHasPersistedTranscript(row)) return null;
+  return (
+    <div style={{ marginTop: "0.85rem", paddingTop: "0.75rem", borderTop: "1px solid rgba(0,0,0,0.08)" }}>
+      <p className="muted" style={{ margin: 0, fontSize: "0.88rem", lineHeight: 1.55 }}>
+        <strong>文字起こしは保存されています。</strong>
+        議事録の AI 推論に失敗しても、下から書き起こしテキストだけダウンロードできます。
+      </p>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.5rem", alignItems: "center" }}>
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ width: "auto", marginTop: 0 }}
+          onClick={() =>
+            void downloadExportTranscriptMd(row.id, `transcript_${exportBasename(row)}.md`).catch((e) => alert(String(e)))
+          }
+        >
+          書き起こし（.md）
+        </button>
+        <button
+          type="button"
+          className="btn-link"
+          style={{ marginTop: 0 }}
+          onClick={() =>
+            void downloadExportTranscript(row.id, `${exportBasename(row)}.txt`).catch((e) => alert(String(e)))
+          }
+        >
+          書き起こし（.txt）
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function clipForDesktopNotification(text: string, maxLen = 900): string {
@@ -130,7 +171,7 @@ async function requestDesktopNotificationPermission(): Promise<NotificationPermi
   }
 }
 
-/** Whisper / PyTorch / CUDA の GPU メモリ・割り当て系とみなす（ログ全文に対して判定） */
+/** Whisper / PyTorch / CUDA / llama.cpp の GPU メモリ・割り当て系とみなす（ログ全文に対して判定） */
 function looksLikeGpuMemoryError(text: string): boolean {
   const s = (text || "").toLowerCase();
   if (!s.trim()) return false;
@@ -140,12 +181,30 @@ function looksLikeGpuMemoryError(text: string): boolean {
   if (s.includes("cuda failed")) return true;
   if (s.includes("torch.cuda.outofmemory")) return true;
   if (s.includes("allocation failed") || s.includes("failed to allocate")) return true;
+  if (s.includes("unable to allocate") || s.includes("could not allocate")) return true;
+  if (s.includes("cuda0") || s.includes("cuda 0")) return true;
   if (s.includes("gpu memory") || s.includes("vram")) return true;
   if (s.includes("cublas_status_alloc_failed")) return true;
   return false;
 }
 
+/** Ollama / llama.cpp がモデル読み込み時に GPU メモリ不足で落ちたログ向け */
+function looksLikeOllamaVramExhaustion(text: string): boolean {
+  const s = (text || "").toLowerCase();
+  if (!s.trim()) return false;
+  const fromOllama =
+    s.includes("ollama") ||
+    s.includes("llama runner") ||
+    s.includes("llama_model_load") ||
+    s.includes("error loading model");
+  const vram =
+    looksLikeGpuMemoryError(text) ||
+    (s.includes("allocate") && (s.includes("cuda") || s.includes("buffer")));
+  return fromOllama && vram;
+}
+
 function ErrorUserGuidance({ errorText }: { errorText: string }) {
+  const ollamaVram = looksLikeOllamaVramExhaustion(errorText);
   const gpu = looksLikeGpuMemoryError(errorText);
   return (
     <p
@@ -159,9 +218,16 @@ function ErrorUserGuidance({ errorText }: { errorText: string }) {
         background: "rgba(0,0,0,0.04)",
       }}
     >
-      {gpu ? (
+      {ollamaVram ? (
         <>
-          このエラーは <strong>GPU のメモリ不足</strong> などが原因の可能性があります。ワーカー側の環境変数（例:{" "}
+          このログは <strong>Ollama が議事録用 LLM（例: 14B クラス）を GPU に載せられず失敗</strong> した可能性が高いです（
+          <code>unable to allocate CUDA</code> などは VRAM 不足が典型です）。
+          左のフォームで<strong>より小さいモデル</strong>（例: <code>qwen2.5:7b</code>）に変えて再投入する、
+          <code>nvidia-smi</code> で空き VRAM を確認する、他の GPU 利用アプリを終了する、Whisper 終了後に Ollama を一度再起動してメモリを空ける、などを試してください。
+        </>
+      ) : gpu ? (
+        <>
+          このエラーは <strong>GPU のメモリ不足</strong> などが原因の可能性があります。文字起こし（Whisper）のときはワーカー側の環境変数（例:{" "}
           <code>WHISPER_MODEL</code> を <code>small</code> に、<code>WHISPER_COMPUTE_TYPE</code> を軽い設定に）を見直したうえで、
           <strong>同じファイルを再アップロードしてやり直してください</strong>。
         </>
@@ -184,7 +250,11 @@ function TroubleshootingHints({ showOpenAiLine = true }: { showOpenAiLine?: bool
           <code>WHISPER_MODEL=small</code> や <code>WHISPER_COMPUTE_TYPE=int8_float16</code> を試す（詳細は README /{" "}
           <code>.env.example</code>）。
         </li>
-        <li>Ollama: モデルが pull 済みか、`OLLAMA_BASE_URL` を確認してください。</li>
+        <li>
+          Ollama: モデルが pull 済みか、<code>OLLAMA_BASE_URL</code> を確認してください。{" "}
+          <code>llama runner</code> や <code>unable to allocate CUDA</code> が出るときは{" "}
+          <strong>LLM 用 VRAM 不足</strong>です。より小さいモデル（7B など）にするか、GPU メモリを空けてから再実行してください。
+        </li>
         {showOpenAiLine ? <li>OpenAI: API キー・上限（429）を確認してください。</li> : null}
         <li>テキスト / SRT: UTF-8 推奨。SRT のタイムコード形式を確認してください。</li>
         <li>カスタムプロンプト: `{"{"}CHUNK_TEXT{"}"}` / `{"{"}EXTRACTED_JSON{"}"}` の有無。</li>
@@ -749,6 +819,7 @@ function RecordCard({
           </div>
           <ErrorUserGuidance errorText={workerErrorLogText} />
           <TroubleshootingHints showOpenAiLine={showOpenAiTroubleshooting} />
+          <TranscriptRecoveryActions row={row} />
         </div>
       ) : statusStr === "cancelled" ? (
         <div className="cancelled-box">
@@ -760,6 +831,7 @@ function RecordCard({
               {summary}
             </pre>
           ) : null}
+          <TranscriptRecoveryActions row={row} />
         </div>
       ) : statusStr.startsWith("Error") ? (
         <div className="error-box">
@@ -767,6 +839,7 @@ function RecordCard({
           <div>{statusStr}</div>
           <ErrorUserGuidance errorText={statusStr} />
           <TroubleshootingHints showOpenAiLine={showOpenAiTroubleshooting} />
+          <TranscriptRecoveryActions row={row} />
         </div>
       ) : (
         <div>
@@ -1207,6 +1280,7 @@ export default function App() {
           email_notify_feature_enabled: false,
           email_notify_available: false,
           openai_enabled: true,
+          error_report_available: false,
         }),
       );
   }, []);
@@ -1259,6 +1333,7 @@ export default function App() {
       openaiFeatureEnabled={openaiFeatureEnabled}
       emailNotifyFeatureEnabled={authStatus.email_notify_feature_enabled === true}
       emailNotifyAvailable={authStatus.email_notify_available === true}
+      errorReportAvailable={authStatus.error_report_available === true}
       authNonce={authNonce}
       onLogout={() => {
         setStoredToken(null);
@@ -1366,6 +1441,7 @@ function AppMain({
   openaiFeatureEnabled,
   emailNotifyFeatureEnabled,
   emailNotifyAvailable,
+  errorReportAvailable,
   authNonce,
   onLogout,
 }: {
@@ -1376,6 +1452,8 @@ function AppMain({
   /** MM_EMAIL_NOTIFY_ENABLED がオンのとき true（メール通知オプションを表示） */
   emailNotifyFeatureEnabled: boolean;
   emailNotifyAvailable: boolean;
+  /** SMTP 済みかつ管理者メール宛先あり（認証オフ時は MM_ERROR_REPORT_TO） */
+  errorReportAvailable: boolean;
   authNonce: number;
   onLogout: () => void;
 }) {
@@ -1415,6 +1493,12 @@ function AppMain({
   const [llmProfileMsg, setLlmProfileMsg] = useState<string | null>(null);
   const [llmProfileErr, setLlmProfileErr] = useState<string | null>(null);
 
+  const [errorReportMessage, setErrorReportMessage] = useState("");
+  const [errorReportDetail, setErrorReportDetail] = useState("");
+  const [errorReportBusy, setErrorReportBusy] = useState(false);
+  const [errorReportOk, setErrorReportOk] = useState<string | null>(null);
+  const [errorReportErr, setErrorReportErr] = useState<string | null>(null);
+
   const [notification, setNotification] = useState<"browser" | "webhook" | "email" | "none">("browser");
   const [email, setEmail] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
@@ -1423,6 +1507,7 @@ function AppMain({
   const [promptExtract, setPromptExtract] = useState<File | null>(null);
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
   const [transcriptOnly, setTranscriptOnly] = useState(false);
+  const [whisperPreset, setWhisperPreset] = useState<"fast" | "balanced" | "accurate">("balanced");
   const [fileDropActive, setFileDropActive] = useState(false);
   const fileDragDepth = useRef(0);
   const mainFileInputRef = useRef<HTMLInputElement>(null);
@@ -1821,6 +1906,7 @@ function AppMain({
         action_rules: actionRules.trim(),
       },
       transcript_only: transcriptOnly,
+      whisper_preset: whisperPreset,
     };
     const fd = new FormData();
     fd.append("metadata", JSON.stringify(meta));
@@ -1990,6 +2076,28 @@ function AppMain({
           ) : null}
 
           <h3>解析設定</h3>
+          <div className="mm-whisper-settings-wrap">
+            <div className="mm-whisper-hint" id="mm-whisper-hint" role="tooltip">
+              動画・音声を <strong>Whisper</strong> で文字起こしするときの「探索の強さ」です。ビーム幅や候補数を変え、
+              <strong>高精度</strong>にすると誤変換が減りやすい反面、<strong>GPU／CPU の負荷と待ち時間が伸びがち</strong>
+              です。<strong>高速</strong>は逆に短時間向けです。モデルサイズ（環境変数 <code>WHISPER_MODEL</code>
+              など）も結果に大きく効きます。.txt / .srt を直接渡す場合はこの設定は使われません。
+            </div>
+            <label className="mm-whisper-settings-label" htmlFor="mm-whisper-preset">
+              音声認識の品質（Whisper）
+            </label>
+            <select
+              id="mm-whisper-preset"
+              value={whisperPreset}
+              onChange={(e) => setWhisperPreset(e.target.value as "fast" | "balanced" | "accurate")}
+              aria-describedby="mm-whisper-hint"
+            >
+              <option value="fast">高速（待ち時間を短くしがち）</option>
+              <option value="balanced">標準（バランス）</option>
+              <option value="accurate">高精度（精度を優先・時間がかかりがち）</option>
+            </select>
+            <p className="muted mm-whisper-footnote">動画・音声ファイルを処理するときのみ効きます。</p>
+          </div>
           {serverOpenaiMode && openaiFeatureEnabled ? (
             <p className="muted" style={{ fontSize: "0.85rem", lineHeight: 1.55 }}>
               OpenAI を使う場合は右上の<strong>アカウントアイコン</strong>からメニューを開き、<strong>設定</strong>から
@@ -2443,13 +2551,15 @@ function AppMain({
                     const m = await getMeLlm();
                     setOpenaiConfigured(m.openai_configured);
                     setProfileOpenaiModel(m.openai_model);
-                    setLlmProfileMsg(
+                    setLlmProfileMsg(null);
+                    setMsg(
                       hadKeyInput
-                        ? "API キーを保存しました。"
+                        ? "OpenAI API キーを保存しました。"
                         : m.openai_configured
-                          ? "モデル設定を更新しました。"
-                          : "モデルを保存しました（API キーは未登録のままです）。",
+                          ? "OpenAI のモデル設定を更新しました。"
+                          : "OpenAI のモデルを保存しました（API キーは未登録のままです）。",
                     );
+                    closeSettings();
                   } catch (ex) {
                     setLlmProfileErr(String(ex));
                   }
@@ -2471,7 +2581,9 @@ function AppMain({
                         await patchMeLlm({ openai_api_key: "" });
                         const m = await getMeLlm();
                         setOpenaiConfigured(m.openai_configured);
-                        setLlmProfileMsg("API キーを削除しました。");
+                        setLlmProfileMsg(null);
+                        setMsg("保存済みの OpenAI API キーを削除しました。");
+                        closeSettings();
                       } catch (ex) {
                         setLlmProfileErr(String(ex));
                       }
@@ -2484,6 +2596,81 @@ function AppMain({
             ) : null}
             {llmProfileMsg ? <p className="muted" style={{ fontSize: "0.85rem" }}>{llmProfileMsg}</p> : null}
             {llmProfileErr ? <p className="error-box">{llmProfileErr}</p> : null}
+              </section>
+            ) : null}
+
+            {errorReportAvailable ? (
+              <section className="settings-section">
+                <h3>不具合・エラーの報告</h3>
+                <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+                  内容をサーバ経由でメール送信します。
+                  {serverOpenaiMode ? (
+                    <>
+                      {" "}
+                      宛先は<strong>管理者として登録されているログイン ID（メールアドレス）全員</strong>です。
+                    </>
+                  ) : (
+                    <>
+                      {" "}
+                      認証がオフのときは環境変数 <code>MM_ERROR_REPORT_TO</code> で指定したアドレスです。
+                    </>
+                  )}
+                </p>
+                <label>状況の説明（必須）</label>
+                <textarea
+                  rows={4}
+                  value={errorReportMessage}
+                  onChange={(e) => {
+                    setErrorReportMessage(e.target.value);
+                    setErrorReportOk(null);
+                    setErrorReportErr(null);
+                  }}
+                  placeholder="例: 議事録をダウンロードしようとしたら真っ白になった、など"
+                />
+                <label>エラーメッセージ・スタック（任意）</label>
+                <textarea
+                  rows={5}
+                  value={errorReportDetail}
+                  onChange={(e) => {
+                    setErrorReportDetail(e.target.value);
+                    setErrorReportOk(null);
+                    setErrorReportErr(null);
+                  }}
+                  placeholder="ブラウザの開発者ツール（F12）の Console に出た赤い文を貼っても構いません。"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={errorReportBusy || !errorReportMessage.trim()}
+                  onClick={() => {
+                    void (async () => {
+                      setErrorReportBusy(true);
+                      setErrorReportOk(null);
+                      setErrorReportErr(null);
+                      try {
+                        const r = await submitErrorReport({
+                          message: errorReportMessage.trim(),
+                          detail: errorReportDetail.trim() || undefined,
+                          page_url: typeof window !== "undefined" ? window.location.href : "",
+                          client_version: version || "",
+                        });
+                        setErrorReportOk(
+                          `送信しました（管理者あて ${r.sent_to_count ?? "—"} 名）。ありがとうございます。`,
+                        );
+                        setErrorReportMessage("");
+                        setErrorReportDetail("");
+                      } catch (ex) {
+                        setErrorReportErr(String(ex));
+                      } finally {
+                        setErrorReportBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  {errorReportBusy ? "送信中…" : "開発者（管理者）へ送信"}
+                </button>
+                {errorReportOk ? <p className="muted" style={{ fontSize: "0.85rem" }}>{errorReportOk}</p> : null}
+                {errorReportErr ? <p className="error-box">{errorReportErr}</p> : null}
               </section>
             ) : null}
           </>
