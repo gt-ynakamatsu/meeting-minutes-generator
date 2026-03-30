@@ -114,7 +114,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | GET | `/api/version` | `version.py` の版情報 |
 | GET | `/api/presets` | `presets_builtin.json` の内容（**`backend/presets_io.load_presets_dict`**、`routes/presets.py`） |
 | POST | `/api/tasks` | `multipart/form-data`: `metadata`（JSON 文字列）、`file`（必須）、任意で `prompt_extract` / `prompt_merge`（.txt） |
-| GET | `/api/records` | クエリ: `days`, `search`, `category`, `status_filter` |
+| GET | `/api/records` | クエリ: `days`, `search`, `category`, `status_filter`、任意で **`limit`**（1〜500、省略時は当該フィルタの**全件**）、**`offset`**（0 以上、既定 0）。**JSON 本文**: **`{ "items": RecordRow[], "total": number }`** — `items` はページング後の一覧、`total` は同一フィルタに一致する**総件数**（UI のページ数計算用）。**`backend/schemas.py`** の **`RecordsPageResponse`**。Streamlit `app.py` は従来どおり **`limit` 省略**で全件取得 |
 | GET | `/api/queue` | 待機・処理中レコード一覧 |
 | GET | `/api/records/{task_id}` | 1 件取得（ポーリング用） |
 | PATCH | `/api/records/{task_id}/summary` | 議事録本文の手動上書き `{ "summary": "..." }` |
@@ -165,7 +165,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
 - **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
 - **ヘルプ**: **`HelpPage`**（`#help`）。メインタイトル横の「ヘルプ」ボタン・アカウントメニューから開く。使い方・Whisper 品質・通知などを集約。
-- **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 30 は UI 上「約1か月（30日）」）。文言はサーバ返却値と一致させる。
+- **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 30 は UI 上「約1か月（30日）」）。文言はサーバ返却値と一致させる。**一覧は 1 ページあたり最大 10 件**（`ARCHIVE_PAGE_SIZE`）。**総件数が 10 を超える**とき、一覧下に **前へ／次へ** と **現在ページ／総ページ・全件数** を表示し、**`GET /api/records?limit=10&offset=…`** で取得する。キーワード・分類・ステータスを変えたときは **1 ページ目に戻す**。削除等で現在ページが空になった場合は **最終ページへ寄せて再取得**する。
 - **音声認識の品質（Whisper）**: 左パネル「解析設定」で **`whisper_preset`** を **`<select>`** で選択。ラベル・ツールチップはユーザー向け日本語（所要時間・精度のトレードオフを説明）。
 - **フォームの `<select>`**: 左サイドバー・設定ドロワー等のプルダウンは、**`onChange` 後に `blur()`** してフォーカスリングが残りにくいようにしている。
 - **Ollama モデル欄**: **初回マウント時と認証状態更新時（`authNonce`）のみ** **`GET /api/ollama/models`** で候補を取得（**ページ再読み込みで更新**。ウィンドウフォーカスや定期ポーリングは行わない）。**ネイティブ `<select>`** で候補のみ選択（手入力不可）。現在値が一覧に無い場合は先頭候補へ寄せる。
@@ -190,6 +190,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | registry を使うか（認証の前提） | `database.py` の `_auth_secret_configured()`（`MM_AUTH_SECRET` の有無） | 上記と同じ環境変数を参照。 |
 | CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | **ルートハンドラ**は `backend/routes/`。秘密ではないが、**許可先を広げすぎない**こと。 |
 | 議事録の保存期限・自動削除 | **`database.py`**: **`DEFAULT_MINUTES_RETENTION_DAYS`（30）**、**`minutes_retention_days()`**（環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈。**未設定・非数時は 30**。**値が 183 のときは 30 日として扱う** — 旧既定からの移行）、**`purge_expired_minutes_db_path`** 等 | **`created_at` が N 日より古い**レコードを対象に、**`pending` と `processing%` を除き**関連ファイル掃除のうえ **DELETE**。**N≤0** で自動削除オフ。起動時 **`main.py` lifespan**、一覧取得前・タスク完了後などで実行。Compose は api/worker に **`MM_MINUTES_RETENTION_DAYS`**（既定注入 **`:-30`**）を渡す。フロントは **`/api/auth/status` の `minutes_retention_days`** で文言と一致させる |
+| 議事録一覧（フィルタ・件数・ページング） | **`database.py`**: **`_recent_records_where_clause`**、**`count_recent_records`**、**`get_recent_records(..., limit=None, offset=0)`**（`limit` 省略時は **LIMIT なし**で全件。指定時は **`ORDER BY created_at DESC` + `LIMIT`/`OFFSET`**） | **`routes/records.py`** の **`GET /api/records`** が `count_recent_records` と `get_recent_records` を呼び **`RecordsPageResponse`** を返す。React の **`listRecords`**（`frontend/src/api.ts`）が `limit`/`offset` を付与可能 |
 | OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
 | API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
 | Ollama 推論（`num_ctx`・タイムアウト） | **`tasks.call_llm`** → **`requests.post`**（**`backend/ollama_client.ollama_generate_url()`**）。**`num_ctx: 4096`**・**`timeout=600`**（コード固定。環境変数では切り替えない） | UI・`metadata` からは変更不可。**`pipeline/02_extract.py`**・**`03_merge.py`** は各自 **`OLLAMA_URL`**／**`NUM_CTX=4096`**・**`REQ_TIMEOUT=600`**（ワーカーと同趣旨）。**VRAM アンロード**: **`try_ollama_unload_model`**・**`OLLAMA_UNLOAD_ON_TASK_END`**（§5.1） |
@@ -321,3 +322,4 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.15 | 2026-03-27 | **§5.1**・**§7.1**・**§11** に Ollama **`num_ctx: 4096`**（ワーカー `call_llm`）・**600 秒タイムアウト**、CLI **`pipeline/02_extract.py` / `03_merge.py`** との整合を追記（VRAM／KV 負荷・CPU オフロード抑制のため `8192` から変更） |
 | 1.19 | 2026-03-28 | **コードに合わせて再同期**: **`GET /api/auth/status`** の拡張フィールド、**`ollama_client` と `tasks.call_llm` の役割分担**、**`try_ollama_unload_model` / `OLLAMA_UNLOAD_ON_TASK_END`**、**マージ失敗フォールバック**（`completed`・アンロード非呼び出し）、**`@celery_app.task`**、**`extract_json_block` は tasks と 02_extract に重複**（§2・§4.2・§4.3・§5・§5.1・§6・§7.1・§11） |
 | 1.20 | 2026-03-28 | **議事録保存期限**: **`MM_MINUTES_RETENTION_DAYS`** 既定 **30 日**（約1か月）、**183 → 30 読み替え**、**`minutes_retention_days` / purge**（§7.1・§11）。**`AuthStatusResponse`** に **`minutes_retention_days`**・**`error_report_available`**（§5）。**§5.1** に **`transcript_only`**・**`whisper_preset`**。**§6** にヘルプ、アーカイブ見出し下の保存期間説明、Whisper 品質 UI、**`<select>` の `blur()`** |
+| 1.21 | 2026-03-28 | **`GET /api/records`**: クエリ **`limit` / `offset`**、レスポンス **`{ items, total }`**（**`RecordsPageResponse`**）。**§6** 議事録アーカイブに **10 件ページング**・前へ次へ・フィルタ変更時のリセット。**§7.1** に **`count_recent_records` / `get_recent_records` のページング**。**Streamlit は `limit` 省略で全件**の旨を §5 に追記 |

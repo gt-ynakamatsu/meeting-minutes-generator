@@ -18,7 +18,7 @@
 *   **テキスト / SRT 入力**: 文字起こし済みの `.txt` や `.srt` だけでも議事録生成できます（Whisper をスキップ）。
 *   **書き起こしのみ**: チェックで **Whisper（または .txt/.srt 読み取り）まで**とし、議事録用 LLM（抽出・統合）は実行しません。
 *   **音声認識の品質（Whisper）**: **高速 / 標準 / 高精度**（`whisper_preset`）で faster-whisper の探索の強さを切り替え（動画・音声のみ）。
-*   **アーカイブ**: 検索・フィルタ、処理キュー表示、議事録の手直し保存に対応。見出し下に **保存期間の説明**（サーバの `minutes_retention_days` と一致）を表示します。
+*   **アーカイブ**: 検索・フィルタ、処理キュー表示、議事録の手直し保存に対応。見出し下に **保存期間の説明**（サーバの `minutes_retention_days` と一致）を表示します。**議事録一覧は 1 ページ最大 10 件**で、それを超える件数があるときは **前へ／次へ** でページ送りします（HTTP API は **`GET /api/records`** の **`limit` / `offset`** と **`{ items, total }`** 応答。詳細は設計書）。
 *   **ヘルプ**: メイン画面の **ヘルプ**（`#help`）から **`HelpPage`** を開き、操作手順に加え **ブラウザ通知の有効化**・**サイト設定**・**HTTPS / 社内 CA 証明書のインストール（Windows）** などを参照できます。
 *   **デスクトップ通知**: 通知先 **ブラウザ** を選ぶと、ジョブ完了時に OS 通知を出せます（Chromium 系は **安全なページ**＝多くの場合 **HTTPS** または **localhost / 127.0.0.1** が必要。`http://` の IP や社内ホスト名のみでは無効になりやすい）。詳細はアプリ内ヘルプの「ブラウザ通知を有効にする手順」を参照してください。
 *   **フロント／API 分離**: UI は **React（`frontend/`）**、HTTP API は **FastAPI（`backend/`）**。構成・エンドポイントは **[設計書 `document/frontend_backend_design.md`](document/frontend_backend_design.md)** を参照。
@@ -185,8 +185,8 @@ python3 03_merge.py
 ## ディレクトリ構成
 
 *   `frontend/`: **React（Vite）** SPA。本番は Nginx で `dist` を配信。ヘルプ本文は `frontend/src/HelpPage.tsx`（ブラウザ通知・証明書手順を含む）
-*   `backend/`: **FastAPI**（`main.py`・`routes/`）。`GET /api/auth/status` に **`minutes_retention_days`** 等を返し、UI の保存期間表示と整合
-*   `database.py`: SQLite・**議事録の保持期限**（`minutes_retention_days` / purge）・認証時のユーザー別 `minutes.db`
+*   `backend/`: **FastAPI**（`main.py`・`routes/`）。`GET /api/auth/status` に **`minutes_retention_days`** 等を返し、UI の保存期間表示と整合。`GET /api/records` は **`{ items, total }`** と任意の **`limit` / `offset`**（一覧ページング用）
+*   `database.py`: SQLite・**議事録の保持期限**（`minutes_retention_days` / purge）・認証時のユーザー別 `minutes.db`・**議事録一覧**（**`count_recent_records`** / **`get_recent_records`** のフィルタ・ページング）
 *   `app.py`: Streamlit フロントエンド（レガシー。Markdown 表示・DL）
 *   `tasks.py`: AI 議事録生成パイプライン（Celery ワーカー）
 *   `pipeline/`: ローカル実行用スクリプト群

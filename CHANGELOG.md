@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.6
+
+- **api**: `GET /api/records` がクエリ `limit` / `offset` に対応し、本文を **`{ "items", "total" }`** で返す（**破壊的変更**: 従来の配列直返しではない）。`RecordsPageResponse`（`backend/schemas.py`）。Streamlit は `limit` 省略で全件のまま
+- **database**: `count_recent_records`、および `get_recent_records` の **`limit` / `offset`**（省略時は従来どおり全件）
+- **frontend**: 議事録アーカイブを **1 ページ 10 件**、超過時は **前へ／次へ**。`listRecords` が `items` / `total` を解釈
+- **frontend**: `tsconfig.json` の **`jsx`: `preserve`**（Vite 任せ。型解決で `react/jsx-runtime` を不要に）
+- **docs**: README・`document/frontend_backend_design.md` に上記を反映
+
 ## 2.3.5
 
 - **frontend**: 解析ファイルを枠クリックで選択・ドラッグ＆ドロップ対応、アイコンと案内文言、大きめドロップゾーン。アーカイブ一覧は約 5 件相当の高さでスクロール。レイアウトで上段（投入・キュー）を拡げ下段アーカイブをコンパクトに。ヒーロー説明文を実装に合わせて更新
