@@ -24,7 +24,21 @@ MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 # パラメータ設定 (選べるように変数化)
 TEMPERATURE = 0
 NUM_CTX = 4096  # 8192 は VRAM/CPU オフロード負荷が大きい。必要なら上げる
-REQ_TIMEOUT = 600
+
+
+def _ollama_timeout_merge():
+    m = (os.getenv("MM_OLLAMA_MERGE_TIMEOUT_SEC") or "").strip()
+    if m:
+        try:
+            return (30, max(60, int(m)))
+        except ValueError:
+            pass
+    raw = (os.getenv("MM_OLLAMA_TIMEOUT_SEC") or "600").strip()
+    try:
+        read_sec = max(60, int(raw))
+    except ValueError:
+        read_sec = 600
+    return (30, read_sec)
 
 def main():
     # 1. 前提チェック
@@ -101,7 +115,7 @@ def main():
     
     try:
         start_time = time.time()
-        res = requests.post(OLLAMA_URL, json=payload, timeout=REQ_TIMEOUT)
+        res = requests.post(OLLAMA_URL, json=payload, timeout=_ollama_timeout_merge())
         elapsed = time.time() - start_time
         
         if res.status_code == 200:

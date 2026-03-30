@@ -21,7 +21,15 @@ def _ollama_generate_url():
 
 OLLAMA_URL = _ollama_generate_url()
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-REQ_TIMEOUT = 600  # 秒
+
+
+def _ollama_timeout():
+    raw = (os.getenv("MM_OLLAMA_TIMEOUT_SEC") or "600").strip()
+    try:
+        read_sec = max(60, int(raw))
+    except ValueError:
+        read_sec = 600
+    return (30, read_sec)
 
 def extract_json_block(text):
     """
@@ -106,7 +114,7 @@ def main():
             }
             
             start_time = time.time()
-            res = requests.post(OLLAMA_URL, json=payload, timeout=REQ_TIMEOUT)
+            res = requests.post(OLLAMA_URL, json=payload, timeout=_ollama_timeout())
             elapsed = time.time() - start_time
             
             if res.status_code == 200:
