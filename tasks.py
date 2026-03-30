@@ -74,6 +74,26 @@ def _notify_task_failure(
 
 OLLAMA_URL = ollama_generate_url()
 DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
+
+
+def _ollama_http_timeout(phase=None):
+    """Ollama /api/generate 用 requests タイムアウト (connect, read) 秒。read はマージが特に長くなりがち。"""
+    if phase == "merge":
+        raw_m = (os.getenv("MM_OLLAMA_MERGE_TIMEOUT_SEC") or "").strip()
+        if raw_m:
+            try:
+                read_sec = max(60, int(raw_m))
+                return (30, read_sec)
+            except ValueError:
+                pass
+    raw = (os.getenv("MM_OLLAMA_TIMEOUT_SEC") or "600").strip()
+    try:
+        read_sec = max(60, int(raw))
+    except ValueError:
+        read_sec = 600
+    return (30, read_sec)
+
+
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 # Pipeline Config
@@ -93,6 +113,26 @@ def _whisper_runtime():
     device = (os.getenv("WHISPER_DEVICE") or "cuda").strip() or "cuda"
     compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or "float16").strip() or "float16"
     return model, device, compute_type
+
+
+def _whisper_transcribe_options(preset: str) -> dict:
+    """UI のプリセット → faster_whisper.WhisperModel.transcribe に渡す追加引数（balanced はライブラリ既定）。"""
+    p = (preset or "").strip().lower() or "balanced"
+    if p == "fast":
+        return {
+            "beam_size": 1,
+            "best_of": 1,
+            "patience": 1.0,
+            "temperature": (0.0, 0.2, 0.4),
+        }
+    if p == "accurate":
+        return {
+            "beam_size": 10,
+            "best_of": 5,
+            "patience": 2.0,
+            "temperature": (0.0, 0.2, 0.4, 0.6),
+        }
+    return {}
 
 
 def _trim_process_memory() -> None:
@@ -127,6 +167,27 @@ def _release_whisper_gpu_resources(device=None):
         torch.cuda.empty_cache()
     except Exception:
         logger.debug("Whisper 後の GPU 解放で例外（無視）", exc_info=True)
+
+
+def _flush_whisper_before_ollama(device=None):
+    """Whisper（faster-whisper / CT2）利用後に呼ぶ。Ollama が同じ GPU に載る前に VRAM を返し切る。
+
+    エラー経路でも問答無用で呼ぶ。device が None のときは環境変数 WHISPER_DEVICE を参照する。
+    """
+    dev_raw = device if device is not None else (os.getenv("WHISPER_DEVICE") or "cuda")
+    dev = (dev_raw or "cuda").strip().lower() or "cuda"
+    logger.info("Whisper 用 GPU メモリをフラッシュします（Ollama 前／エラー時）device=%s", dev)
+    _release_whisper_gpu_resources(dev)
+    gc.collect()
+    gc.collect()
+    if dev == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("Whisper フラッシュの empty_cache で例外（無視）", exc_info=True)
+    gc.collect()
+    _trim_process_memory()
 
 
 def load_builtin_presets():
@@ -377,13 +438,25 @@ def call_llm(prompt, config, temperature=0.0, json_mode=False, ollama_phase=None
                     "stream": False,
                     "options": ollama_options,
                 },
-                timeout=600,
+                timeout=_ollama_http_timeout(ollama_phase),
             )
 
             if res.status_code == 200:
                 return res.json().get("response", "")
-            else:
-                raise Exception(f"Ollama HTTP {res.status_code}")
+            detail = ""
+            try:
+                err_j = res.json()
+                if isinstance(err_j, dict) and err_j.get("error"):
+                    detail = str(err_j["error"]).strip()
+            except Exception:
+                pass
+            if not detail:
+                raw = (res.text or "").strip()
+                if len(raw) > 1200:
+                    raw = raw[:1200] + "…"
+                detail = raw
+            suffix = f": {detail}" if detail else ""
+            raise Exception(f"Ollama HTTP {res.status_code}{suffix}")
         except Exception as e:
             raise Exception(f"Ollama Error: {str(e)}")
 
@@ -421,7 +494,7 @@ def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None, llm_config
                 os.remove(p)
         except OSError:
             pass
-    _release_whisper_gpu_resources()
+    _flush_whisper_before_ollama(None)
     _try_ollama_unload_for_config(llm_config, ollama_model or "")
 
 
@@ -466,7 +539,7 @@ def _finish_transcript_only_task(
     except OSError:
         pass
     _cleanup_user_prompts(task_id)
-    _release_whisper_gpu_resources()
+    _flush_whisper_before_ollama(None)
     _try_ollama_unload_for_config(llm_config, ollama_model)
     final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
     if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
@@ -497,6 +570,8 @@ def process_video_task(
     _lc = dict(llm_config) if isinstance(llm_config, dict) else {}
     notification_type = _lc.pop("notification_type", "browser")
     transcript_only = bool(_lc.pop("transcript_only", False) or _lc.pop("audio_extract_only", False))
+    _wp = str(_lc.pop("whisper_preset", "") or "balanced").strip().lower()
+    whisper_preset = _wp if _wp in ("fast", "balanced", "accurate") else "balanced"
     llm_config = _lc if _lc else None
 
     db.purge_expired_minutes(owner_username or "")
@@ -513,7 +588,7 @@ def process_video_task(
         except OSError:
             pass
         _cleanup_user_prompts(task_id)
-        _release_whisper_gpu_resources()
+        _flush_whisper_before_ollama(None)
         return
 
     audio_path = os.path.join("downloads", f"{uuid.uuid4()}.mp3")
@@ -534,8 +609,11 @@ def process_video_task(
     ext = os.path.splitext(file_path)[1].lower()
     is_transcript = ext in (".txt", ".srt")
     is_audio_only = ext in (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".m4b")
+    # Whisper 使用時は実際の device（cuda 等）を記録し、fail / 例外で同じデバイスをフラッシュする
+    whisper_cuda_device = None
 
     def fail(msg, exc_info=False):
+        _flush_whisper_before_ollama(whisper_cuda_device)
         if _record_cancelled(task_id, owner_username or ""):
             _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
             return
@@ -550,7 +628,6 @@ def process_video_task(
                 os.remove(file_path)
         except Exception:
             pass
-        _release_whisper_gpu_resources()
         _try_ollama_unload_for_config(llm_config, ollama_model)
 
     try:
@@ -616,12 +693,21 @@ def process_video_task(
                 return
             db.update_record(task_id, owner_username or "", status="processing:transcribing")
             wm, wd, wct = _whisper_runtime()
-            logger.info("Whisper: model=%s device=%s compute_type=%s", wm, wd, wct)
+            whisper_cuda_device = wd
+            tw_kw = _whisper_transcribe_options(whisper_preset)
+            logger.info(
+                "Whisper: model=%s device=%s compute_type=%s preset=%s transcribe_kw=%s",
+                wm,
+                wd,
+                wct,
+                whisper_preset,
+                tw_kw if tw_kw else "library_defaults",
+            )
             model = None
             segments = None
             try:
                 model = WhisperModel(wm, device=wd, compute_type=wct)
-                raw_segments, _ = model.transcribe(audio_path)
+                raw_segments, _ = model.transcribe(audio_path, **tw_kw)
                 segments = normalize_to_segments(list(raw_segments))
             finally:
                 try:
@@ -631,6 +717,9 @@ def process_video_task(
                     pass
                 model = None
                 _release_whisper_gpu_resources(wd)
+
+            # CT2 の VRAM を返し切ってから Ollama が同じ GPU にロードする（連続利用時の OOM 対策）
+            _flush_whisper_before_ollama(wd)
 
             chunks_for_ai, raw_transcript = build_chunks_from_segments(segments)
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
@@ -760,13 +849,13 @@ def process_video_task(
         _cleanup_user_prompts(task_id)
 
         # 次ジョブ開始時の GPU / Ollama VRAM 不足を防ぐ（同一ワーカーで連続処理する場合）
-        _release_whisper_gpu_resources()
+        _flush_whisper_before_ollama(whisper_cuda_device)
         _try_ollama_unload_for_config(llm_config, ollama_model)
 
     except Exception as e:
         import traceback
 
-        _release_whisper_gpu_resources()
+        _flush_whisper_before_ollama(whisper_cuda_device)
         traceback.print_exc()
         if _record_cancelled(task_id, owner_username or ""):
             _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
