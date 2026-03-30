@@ -118,6 +118,8 @@ async def create_task(
         transcript_only=bool(meta.transcript_only),
     )
 
+    whisper_bundle = {"whisper_preset": meta.whisper_preset}
+
     if meta.llm_provider == "openai":
         llm_config = {
             "provider": "openai",
@@ -126,6 +128,7 @@ async def create_task(
             "openai_model": openai_model,
             "notification_type": meta.notification_type,
             "transcript_only": bool(meta.transcript_only),
+            **whisper_bundle,
         }
     else:
         llm_config = {
@@ -135,6 +138,7 @@ async def create_task(
             "openai_model": meta.openai_model,
             "notification_type": meta.notification_type,
             "transcript_only": bool(meta.transcript_only),
+            **whisper_bundle,
         }
 
     pe_bytes = await prompt_extract.read() if prompt_extract and prompt_extract.filename else None
