@@ -80,6 +80,7 @@ sequenceDiagram
 
     U->>A: ファイルアップロード POST /api/tasks
     A->>D: 初期レコード作成 (Status: pending)
+    Note over A,D: 認証有効かつ Web の owner ありなら registry の usage_job_log にメタ 1 行（本文・ファイル名は保存しない）
     A->>R: タスク登録 (process_video_task)
     A-->>U: 受付完了 JSON
 
@@ -128,9 +129,9 @@ sequenceDiagram
 
 ## 4. データモデル設計 (Physical)
 
-SQLite3 (`data/minutes.db`) を使用。
+議事録本体は SQLite3（ユーザー別 **`data/user_data/.../minutes.db`** または従来 **`data/minutes.db`**）。認証有効時は **`data/registry.db`** にユーザーと利用ログを保持（**§4.1**）。
 
-### テーブル: `records`
+### テーブル: `records`（各 `minutes.db`）
 
 | カラム名 | データ型 | 制約 | 説明 |
 | :--- | :--- | :--- | :--- |
@@ -142,7 +143,19 @@ SQLite3 (`data/minutes.db`) を使用。
 | **summary** | TEXT | NULLABLE | 最終生成されたMarkdown形式の議事録、または抽出されたJSON。 |
 | **created_at** | TIMESTAMP | | レコード作成日時。Pythonの `datetime.now()` で生成。 |
 
-### 4.1 議事録レコードの保存期限と自動削除
+### 4.1 registry（`data/registry.db`、認証 `MM_AUTH_SECRET` 有効時）
+
+ユーザー認証・OpenAI キー保存に加え、**管理者向け利用状況**用テーブルを持つ（詳細は **`document/frontend_backend_design.md` §5.2**）。
+
+| テーブル | 説明 |
+| :--- | :--- |
+| `users` | ログイン ID（列名 `username`＝正規化メール）、bcrypt ハッシュ、`is_admin` |
+| **`usage_job_log`** | ジョブ受付ごとに 1 行。`task_id` UNIQUE。**議事録・書き起こし本文・ファイル名文字列は保存しない**（`media_kind` は拡張子から推定） |
+| **`usage_admin_notes`** | 管理者が画面から追記する運用メモ |
+
+API・ワーカー双方が `./data` をマウントするため、**api** が `POST /api/tasks` 受付時に書き込んだログは **registry** に永続化され、**GET `/api/admin/usage/*`** で集計される。
+
+### 4.2 議事録レコードの保存期限と自動削除
 
 - **`database.py`** の **`minutes_retention_days()`** が環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈する。**未設定・非数時は `DEFAULT_MINUTES_RETENTION_DAYS`（30、約1か月）**。値が **183**（旧いちばん多かった既定）のときは **30 日として扱う**。**0 以下**で自動削除は行わない。
 - **`purge_expired_minutes_db_path`**（および **`purge_expired_minutes`** / **`purge_all_minutes_archives`**）が、**`created_at` が現在より N 日より前**のレコードを対象に、**`status` が `pending` または `processing` で始まるものを除き**、関連アップロード等を掃除したうえで **DELETE** する。
@@ -177,11 +190,11 @@ SQLite3 (`data/minutes.db`) を使用。
 
 ## 6. セキュリティと制約事項
 
-*   **認証**: 環境変数 `MM_AUTH_SECRET` 設定時に **JWT（Bearer）＋ registry DB** によるログインを有効化。`data/registry.db` の `users` テーブルにパスワードハッシュ（bcrypt）と `is_admin` を保持。ログイン ID は **メールアドレス**（DB 主キー列名は `username`）。ユーザーが 0 件の初回のみ、ブラウザの **初回セットアップ**（または `MM_BOOTSTRAP_ADMIN_*`）で最初の管理者を登録可能。管理者は **設定ドロワーの「ユーザー・権限」タブ**から追加ユーザー・パスワード再設定・管理者権限の付与・解除が可能。議事録本体はユーザー別に `data/user_data/<slug>/minutes.db`（従来は `data/minutes.db`）。
+*   **認証**: 環境変数 `MM_AUTH_SECRET` 設定時に **JWT（Bearer）＋ registry DB** によるログインを有効化。`data/registry.db` の `users` テーブルにパスワードハッシュ（bcrypt）と `is_admin` を保持。ログイン ID は **メールアドレス**（DB 主キー列名は `username`）。ユーザーが 0 件の初回のみ、ブラウザの **初回セットアップ**（または `MM_BOOTSTRAP_ADMIN_*`）で最初の管理者を登録可能。管理者は **設定ドロワーの「ユーザー・権限」タブ**から追加ユーザー・パスワード再設定・管理者権限の付与・解除が可能。**「利用状況」タブ**では **`usage_job_log`** の集計（**最大 365 日**、**議事録・書き起こし本文は含まない**）と **`usage_admin_notes`** の編集が可能（**§4.1**・**`frontend_backend_design.md` §5.2**）。議事録本体はユーザー別に `data/user_data/<slug>/minutes.db`（従来は `data/minutes.db`）。
 *   **秘密情報と設定の所在（外部流出防止）**: **JWT 署名鍵・TTL・自己登録可否**は `backend/auth_settings.py` が環境変数（`MM_AUTH_SECRET` 等）から読み取る。**CORS**は `backend/main.py`（**HTTP ハンドラ本体**は `backend/routes/`）。**registry を認証前提とするか**は `database.py` が `MM_AUTH_SECRET` の有無で判定。これらの**秘密鍵・パスワード・利用者 API キー**をフロントの `VITE_*` やリポジトリ・スクリーンショットに含めないこと。詳細な区分（何が秘密か、ポートは秘密ではないか、チェックリスト）は **`document/frontend_backend_design.md` §7.1〜7.4** に明記する。
 *   **同時実行数**: Celery Workerの `concurrency` は **1** に設定。GPUメモリ制限のため、複数の重量級タスク（Whisper/LLM）の並列実行は行わない。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
-*   **議事録 DB の保存期限**: **`MM_MINUTES_RETENTION_DAYS`**（詳細は **§4.1**）。既定 **30 日**。詳細な環境変数一覧は **`document/frontend_backend_design.md` §7.1** を参照。
+*   **議事録 DB の保存期限**: **`MM_MINUTES_RETENTION_DAYS`**（詳細は **§4.2**）。既定 **30 日**。詳細な環境変数一覧は **`document/frontend_backend_design.md` §7.1** を参照。
 
 ---
-*Last Updated: 2026-03-28（§4.1 議事録保存期限・自動削除、`MM_MINUTES_RETENTION_DAYS` 既定30・183読み替え。§6 にデータ保護と併記。§2.2・§3.1・§3.2・§5 は現行 `tasks`/`ollama_client` に同期）*
+*Last Updated: 2026-03-30（§4 に registry・利用ログ。§3.1 シーケンスに記録タイミング注記。§6 に利用状況とプライバシー。§2.2・§3.2・§5 は現行 `tasks`/`ollama_client` に同期）*

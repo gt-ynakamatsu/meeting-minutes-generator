@@ -130,6 +130,11 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | PATCH | `/api/admin/users/{login_email}/password` | **管理者のみ**。`{ new_password }`（`login_email` は URL エンコード） |
 | PATCH | `/api/admin/users/{login_email}/role` | **管理者のみ**。`{ is_admin }`（最後の管理者の降格は不可） |
 | DELETE | `/api/admin/users/{login_email}` | **管理者のみ**。自分自身・最後の管理者は不可 |
+| GET | `/api/admin/usage/summary` | **管理者のみ**。クエリ **`days`**（1〜**365**、既定 30）。**`AdminUsageSummaryResponse`**（`backend/schemas.py`）。投入件数・書き起こしのみ／議事録生成の割合・Ollama/OpenAI 件数・**Ollama/OpenAI それぞれの議事録生成ジョブに対するモデル別内訳**・動画・音声向け Whisper プリセット集計・媒体種別（拡張子から推定）など。**認証シークレット未設定時は空集計** |
+| GET | `/api/admin/usage/events` | **管理者のみ**。クエリ **`days`**（1〜365）、**`limit`**（1〜500）、**`offset`**。直近の投入ログ行一覧と総件数（ページング用） |
+| GET | `/api/admin/usage/notes` | **管理者のみ**。運用メモ一覧（新しい順） |
+| POST | `/api/admin/usage/notes` | **管理者のみ**。`{ "body": "…" }`（1〜8000 文字）でメモ追加。著者は JWT の `sub`（ログイン ID） |
+| DELETE | `/api/admin/usage/notes/{note_id}` | **管理者のみ**。メモ削除 |
 | GET | `/api/me/llm` | ログインユーザーの OpenAI 設定の参照。**`{ openai_configured, openai_model, openai_feature_enabled }`**。認証オフ時はキー未設定扱い・モデルは既定文字列。**`MM_OPENAI_ENABLED` オフ**時は `openai_feature_enabled: false`（`openai_configured` も偽として扱う） |
 | PATCH | `/api/me/llm` | **`{ openai_api_key?, openai_model? }`**。registry に保存。**`MM_OPENAI_ENABLED` オフ**のときは 400。認証オフ時は 400（サーバ保存不可） |
 | POST | `/api/records/{task_id}/discard` | 待機・実行中ジョブの破棄。DB を cancelled、**Celery `revoke`（terminate）**、投入ファイル・ユーザープロンプト一時を削除 |
@@ -154,6 +159,14 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 アップロードファイルは衝突回避のため API 側で `downloads/{task_id}_{元ファイル名}` に保存し、DB の `filename` には元の表示名を保存する。
 
+### 5.2 利用状況ログ（registry・管理者向け）
+
+- **記録タイミング**: **`MM_AUTH_SECRET` が設定されている**（`_auth_secret_configured()` が真）とき、**ジョブ受付直後**（`save_initial_task` のあと）。**React**: **`POST /api/tasks`** で **`owner`（JWT の `sub`）が空でない**ときのみ。**Streamlit `app.py`**: **`auth_enabled()`** のとき（フォームのメール等でユーザー列を埋める。未入力なら空）。
+- **保存先**: **`data/registry.db`** の **`usage_job_log`**（`task_id` UNIQUE）。マイグレーションは **`database._migrate_usage_tables`**（`init_registry_db` から）。
+- **保存するフィールドの要点**: `user_email`（正規化）、`transcript_only`、`llm_provider`（`ollama` / `openai`）、`model_name`（当該ジョブで選ばれたモデル）、`whisper_preset`、`media_kind`（**元ファイル名は保存せず**、`database.usage_media_kind_from_filename` が **basename の拡張子のみ**から `video` / `audio` / `srt` / `txt` / `other` を決定）。**議事録本文・書き起こし全文は含めない**。
+- **運用メモ**: 同じ registry の **`usage_admin_notes`**。**`database.usage_admin_note_*`** と上記 **`/api/admin/usage/notes`**。
+- **集計の上限**: サマリ・イベントとも **クエリ `days` は最大 365**（サーバ側でも `database.admin_usage_*` でクランプ）。
+
 ---
 
 ## 6. フロントエンド設計
@@ -162,8 +175,8 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **状態**: フォームはローカル state。ブラウザ通知用に `localStorage` キー `mm_pending_tasks` で `task_id` 一覧を保持し、10 秒間隔で `GET /api/records/{id}` をポーリング。**通知を使うユーザーは、ブラウザが出す通知許可のポップアップ／バナーで「許可」する**（ブロックのままでは通知が届かない）。
 - **ジョブ破棄**: キュー表示などから **`POST /api/records/{task_id}/discard`**（`discardRecord`）を呼び、待機・処理中タスクを取消・ファイル掃除。
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
-- **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
-- **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
+- **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」「**利用状況・ログ**」（設定ドロワーを **利用状況** タブで開く）。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
+- **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** と **利用状況** を表示する。**利用状況**では期間選択（7 / 30 / 90 / **365 日**）、サマリ・イベント一覧・運用メモ（**`frontend/src/api.ts`** の **`adminUsageSummary`** 等）。**ヘルプ**（`HelpPage`）に利用ログの範囲とプライバシーを記載。一般タブのアカウント欄に「管理者」と表示される場合がある。
 - **ヘルプ**: **`HelpPage`**（`#help`）。メインタイトル横の「ヘルプ」ボタン・アカウントメニューから開く。使い方・Whisper 品質・通知などを集約。
 - **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 30 は UI 上「約1か月（30日）」）。文言はサーバ返却値と一致させる。**一覧は 1 ページあたり最大 10 件**（`ARCHIVE_PAGE_SIZE`）。**総件数が 10 を超える**とき、一覧下に **前へ／次へ** と **現在ページ／総ページ・全件数** を表示し、**`GET /api/records?limit=10&offset=…`** で取得する。キーワード・分類・ステータスを変えたときは **1 ページ目に戻す**。削除等で現在ページが空になった場合は **最終ページへ寄せて再取得**する。
 - **音声認識の品質（Whisper）**: 左パネル「解析設定」で **`whisper_preset`** を **`<select>`** で選択。ラベル・ツールチップはユーザー向け日本語（所要時間・精度のトレードオフを説明）。
@@ -198,6 +211,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | エクスポートヘッダ・行 dict 化 | **`backend/http_utils.py`** | **`routes/records.py`** で利用。 |
 | ログイン時パスワード検証 | **`backend/passwords.py`** | **`routes/auth.py`** で利用。 |
 | ユーザープロンプト一時保存 | **`backend/storage.py`** | **`routes/jobs.py`**（multipart）と **Streamlit `app.py`**（バイト列）が同じ保存規約を使う。 |
+| 管理者向け利用ログ・集計 | **`database.py`**: **`record_usage_job_submission`**, **`admin_usage_summary`**, **`admin_usage_events`**, **`usage_admin_notes_*`**（テーブル **`usage_job_log`**, **`usage_admin_notes`**）。**`routes/jobs.py`**（認証かつ `owner` ありで記録）、**`app.py`**（**`auth_enabled()`** 時）。**`routes/admin.py`**（**`/api/admin/usage/*`**） | **議事録・書き起こし本文は保存しない**。集計期間 **最大 365 日**。 |
 | メール通知（SMTP） | API・ワーカー双方に **`MM_SMTP_*`**（`MM_SMTP_HOST`, `MM_SMTP_FROM` 必須など。詳細は `.env.example`） | `email_notify_available` の判定とタスク検証に使用。 |
 | ホスト公開ポート・ブローカ URL | `docker-compose.yml`、`.env` / `.env.example` | **ポート番号自体は「秘密」ではない**が、不要なポートを外向きに開かない運用とセット。 |
 | フロントの API ベース URL | ビルド時 `VITE_API_BASE` → `frontend/src/api.ts` の `PREFIX` | **公開してよい URL のみ**（後述）。 |

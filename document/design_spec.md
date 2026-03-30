@@ -24,6 +24,7 @@
 | | **OpenAI 機能フラグ** | 環境変数 **`MM_OPENAI_ENABLED`**（`feature_flags.py`）で OpenAI 連携をオフにできる。オフ時は UI・API とも OpenAI 経路を使わず Ollama のみ（課金 API の無効化・既定 Docker 向け）。 |
 | **管理** | 履歴管理 | 過去の議事録をデータベースで一元管理。**サーバは環境変数 `MM_MINUTES_RETENTION_DAYS`（既定 30 日≒約1か月）に基づき、古いレコードを自動削除**（待機・処理中は除く）。React は **`/api/auth/status` の `minutes_retention_days`** を使い、アーカイブ見出し下に保存期間を表示。 |
 | | 自動クリーンアップ | 処理パイプライン完了後の**中間ファイル**（抽出音声・動画等）の削除に加え、**期限切れ議事録レコード**と関連アップロードの削除（**`database.py` の purge**。詳細は **`document/frontend_backend_design.md` §7.1**）。 |
+| | **利用状況ログ（管理者）** | **`MM_AUTH_SECRET` 有効時**、管理者のみ設定の **「利用状況」** でジョブ投入の集計を閲覧。**議事録本文・書き起こし・ファイル名は記録しない**（メタデータと拡張子由来の媒体種別のみ）。集計期間 **最大 365 日**。Ollama/OpenAI ごとの **モデル別内訳**、運用メモの CRUD。詳細は **`document/frontend_backend_design.md` §5.2**。 |
 | **認証** | 初回セットアップ | `MM_AUTH_SECRET` 有効時、ユーザー 0 件なら Web で最初の管理者（**メールアドレス・パスワード**）を登録。 |
 | | ログイン | JWT（Bearer）。以降 API は認証ユーザーに紐づく議事録 DB を使用。 |
 | | ユーザー・権限管理 | 管理者のみ：設定ドロワー内の専用タブでユーザー追加、パスワード再設定、管理者権限の付与・解除、削除（最後の管理者は保護）。 |
@@ -88,7 +89,7 @@ graph TD
 
 ### 3.2 データベース設計 (簡易スキーマ)
 
-**Tasks Table**
+**議事録 `records`（各 `minutes.db`）**
 | カラム名 | 型 | 説明 |
 | :--- | :--- | :--- |
 | `id` | TEXT (PK) | タスク固有のUUID |
@@ -99,13 +100,23 @@ graph TD
 | `summary` | TEXT | 最終的な議事録データ (JSON/Markdown) |
 | `created_at` | TIMESTAMP | 作成日時 |
 
+**registry（認証有効時・`data/registry.db`）**
+
+| テーブル | 用途 |
+| :--- | :--- |
+| `users` | ログイン ID（`username`＝正規化メール）、パスワードハッシュ、`is_admin` |
+| **`usage_job_log`** | **利用状況集計用**。ジョブ受付時に 1 行（`task_id` 一意）。**議事録・書き起こし本文・ファイル名文字列は保持しない** |
+| **`usage_admin_notes`** | 管理者が追記する運用メモ（経営・インフラ訴求用など） |
+
+スキーマ・記録条件の詳細は **`document/frontend_backend_design.md` §5.2**。
+
 ## 4. インターフェース設計
 
 ### 4.1 画面構成（React + FastAPI 構成時）
 1.  **認証**（`MM_AUTH_SECRET` 設定時）
     *   初回: 初回セットアップ（管理者ユーザー・パスワード）
     *   2 回目以降: ログイン
-    *   管理者: 右上アイコンメニューから「ユーザー・権限管理」→ 設定ドロワーでユーザー運用
+    *   管理者: 右上アイコンメニューから「ユーザー・権限管理」「**利用状況・ログ**」→ 設定ドロワーでユーザー運用・**利用集計（最大 365 日）・運用メモ**
 2.  **サイドバー (左側)**
     *   新規解析依頼フォーム（**通知**: ブラウザ / Webhook / **メール（SMTP 設定時）** / なし、ファイルアップローダー）
     *   **書き起こしのみ**（チェック時は Whisper または .txt/.srt のみ。議事録用 LLM は使わない）
@@ -170,7 +181,7 @@ graph TD
 *   `backend/routes/`: **ドメイン別 APIRouter**（実装の見通し用に分割）
     *   `meta.py` … ヘルス・版情報・Ollama タグ一覧
     *   `auth.py` … 認証状態・ログイン・初回セットアップ・自己登録・`/auth/me`
-    *   `admin.py` … 管理者ユーザー CRUD
+    *   `admin.py` … 管理者ユーザー CRUD、**`/api/admin/usage/*`**（利用サマリ・イベント・メモ）
     *   `profile.py` … `/me/llm`（OpenAI 設定）
     *   `presets.py` … プリセット JSON 配信
     *   `jobs.py` … `POST /tasks`（Celery 投入）
@@ -185,9 +196,9 @@ graph TD
 *   `app.py`: Streamlit（レガシー UI。プリセット・プロンプト保存は **`backend.presets_io`** / **`backend.storage`** で API と整合）
 *   `tasks.py`: Celery ワーカー（**`@celery_app.task`** の **`process_video_task`**）。**`call_llm`** が Ollama 時 **`requests.post`**（**`ollama_generate_url`**、**`num_ctx` 4096**、**timeout 600**）。**`extract_json_block`** は本モジュール内関数。**`backend.ollama_client`** の **`try_ollama_unload_model`** をエラー／破棄時に利用（§3.1.1）
 *   `celery_app.py`: Celery アプリ定義（API はここだけ import して `send_task`）
-*   `database.py`: DB 操作ラッパー（認証時は `registry.db`・ユーザー別 `minutes.db`）
+*   `database.py`: DB 操作ラッパー（認証時は **`registry.db`**（ユーザー・**`usage_job_log` / `usage_admin_notes`**）・ユーザー別 `minutes.db`）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
 ---
-*Last Updated: 2026-03-28（§2.1 履歴・自動クリーンアップに議事録 DB 保存期限。§4.1 にヘルプ・Whisper 品質・書き起こしのみ・アーカイブ説明・select blur。§3.1・§3.1.1・付録は現行コード同期）*
+*Last Updated: 2026-03-30（§2.1 に管理者向け利用状況ログ。§3.2 に registry テーブル概要。§4.1・付録を利用状況 API と同期。§3.1・§3.1.1 は現行コード同期）*
