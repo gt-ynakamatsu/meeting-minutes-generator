@@ -120,7 +120,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | PATCH | `/api/records/{task_id}/summary` | 議事録本文の手動上書き `{ "summary": "..." }` |
 | GET | `/api/records/{task_id}/export/minutes` | 議事録を `text/markdown` でダウンロード（長大本文用・data URL 回避） |
 | GET | `/api/records/{task_id}/export/transcript` | 書き起こし全文を `text/plain` でダウンロード |
-| GET | `/api/auth/status` | **`AuthStatusResponse`**（`backend/schemas.py`）。`auth_required`, `bootstrap_needed`, `self_register_allowed` に加え **`email_notify_feature_enabled`**（`MM_EMAIL_NOTIFY_ENABLED`）、**`email_notify_available`**（上記 ON かつ SMTP 設定済み）、**`openai_enabled`**（`MM_OPENAI_ENABLED`）。`MM_AUTH_SECRET` 未設定時は `auth_required: false` ・他はフラグのみ意味を持つ |
+| GET | `/api/auth/status` | **`AuthStatusResponse`**（`backend/schemas.py`）。`auth_required`, `bootstrap_needed`, `self_register_allowed`、`email_notify_feature_enabled`（`MM_EMAIL_NOTIFY_ENABLED`）、`email_notify_available`（上記 ON かつ SMTP 設定済み）、`openai_enabled`（`MM_OPENAI_ENABLED`）、**`error_report_available`**（SMTP・管理者宛先等により「不具合・エラーの報告」が使えるか）、**`minutes_retention_days`**（**`database.minutes_retention_days()`** の整数。議事録レコードの保存日数。React は「議事録アーカイブ」見出し直下の説明に使用）。`MM_AUTH_SECRET` 未設定時は `auth_required: false` ・他はフラグのみ意味を持つ |
 | POST | `/api/auth/bootstrap` | 初回のみ（registry のユーザー数が 0）。`{ email, password }` で最初の **管理者** を作成し JWT を返す |
 | POST | `/api/auth/register` | ユーザーが 1 人以上いるとき、自己登録で **一般ユーザー** を追加し JWT を返す（`MM_AUTH_SELF_REGISTER=0` で無効） |
 | POST | `/api/auth/login` | `{ email, password }` → JWT |
@@ -149,6 +149,8 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **マージ LLM 失敗時**: **`call_llm` が例外**（タイムアウト等）のとき **`Merge failed (Error: …)` と抽出 JSON** を連結した文字列を **`summary`** にし、**`status` は `completed`** のまま（**このフォールバック経路では `try_ollama_unload` は呼ばない**。実装上の注意として、タイムアウト後も Ollama 側がモデル保持し続ける場合は **`OLLAMA_UNLOAD_ON_TASK_END`** 運用やサーバ側設定の検討対象）。
 - 会議メタ: `topic`, `meeting_date`, `category`, `tags`, `preset_id`
 - 精度用: `context` … `purpose`, `participants`, `glossary`, `tone`, `action_rules`
+- **書き起こしのみ**: `transcript_only` … 真のとき動画・音声は Whisper（または .txt/.srt 直読み）までとし、**議事録用 LLM（抽出・マージ）は実行しない**（Ollama/OpenAI は使わない）
+- **音声認識の品質（Whisper）**: `whisper_preset` … `fast` | `balanced` | `accurate`（**動画・音声**の faster-whisper 探索の強さ。ワーカー **`tasks.py`** で解釈。既定 `balanced`）
 
 アップロードファイルは衝突回避のため API 側で `downloads/{task_id}_{元ファイル名}` に保存し、DB の `filename` には元の表示名を保存する。
 
@@ -162,6 +164,10 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **認証 UI**: `GET /api/auth/status` で `bootstrap_needed` が真のとき **初回セットアップ**（管理者・パスワード確認）→ `POST /api/auth/bootstrap`。それ以外は **ログイン** / **新規登録**タブ（`self_register_allowed` が真のとき）→ `POST /api/auth/login` または `POST /api/auth/register`。JWT は `localStorage`（`mm_auth_token`）。API 呼び出しは `Authorization: Bearer`。
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
 - **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示し、ユーザー一覧・追加・パスワード再設定・**管理者権限の付与・解除**・削除（API と同じ制約：最後の管理者は保護）を集約する。一般タブのアカウント欄に「管理者」と表示される場合がある。
+- **ヘルプ**: **`HelpPage`**（`#help`）。メインタイトル横の「ヘルプ」ボタン・アカウントメニューから開く。使い方・Whisper 品質・通知などを集約。
+- **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 30 は UI 上「約1か月（30日）」）。文言はサーバ返却値と一致させる。
+- **音声認識の品質（Whisper）**: 左パネル「解析設定」で **`whisper_preset`** を **`<select>`** で選択。ラベル・ツールチップはユーザー向け日本語（所要時間・精度のトレードオフを説明）。
+- **フォームの `<select>`**: 左サイドバー・設定ドロワー等のプルダウンは、**`onChange` 後に `blur()`** してフォーカスリングが残りにくいようにしている。
 - **Ollama モデル欄**: **初回マウント時と認証状態更新時（`authNonce`）のみ** **`GET /api/ollama/models`** で候補を取得（**ページ再読み込みで更新**。ウィンドウフォーカスや定期ポーリングは行わない）。**ネイティブ `<select>`** で候補のみ選択（手入力不可）。現在値が一覧に無い場合は先頭候補へ寄せる。
 - **OpenAI オフ時の投入フォーム**: 「AI の接続先」は Ollama のみ表示。**OpenAI 用モデルプルダウンは表示しない**（未使用のため）。
 - **マージのみ失敗した場合の議事録表示**: **`status` は `completed`**。本文は先頭が **`Merge failed (Error: …)`** で続けて **マージ前の抽出 JSON**（`react-markdown` で JSON として表示されない場合あり。生テキストとして閲覧）。
@@ -183,7 +189,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | JWT 署名鍵・トークン TTL・自己登録可否 | `backend/auth_settings.py`（`MM_AUTH_SECRET`, `MM_AUTH_TOKEN_HOURS`, `MM_AUTH_SELF_REGISTER`） | **秘密鍵はこのモジュール経由でサーバ内のみ**。クライアント JS に含めない。 |
 | registry を使うか（認証の前提） | `database.py` の `_auth_secret_configured()`（`MM_AUTH_SECRET` の有無） | 上記と同じ環境変数を参照。 |
 | CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | **ルートハンドラ**は `backend/routes/`。秘密ではないが、**許可先を広げすぎない**こと。 |
-| 議事録保持日数などその他 | `database.py` 等（例: `MM_MINUTES_RETENTION_DAYS`） | サーバ環境変数。 |
+| 議事録の保存期限・自動削除 | **`database.py`**: **`DEFAULT_MINUTES_RETENTION_DAYS`（30）**、**`minutes_retention_days()`**（環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈。**未設定・非数時は 30**。**値が 183 のときは 30 日として扱う** — 旧既定からの移行）、**`purge_expired_minutes_db_path`** 等 | **`created_at` が N 日より古い**レコードを対象に、**`pending` と `processing%` を除き**関連ファイル掃除のうえ **DELETE**。**N≤0** で自動削除オフ。起動時 **`main.py` lifespan**、一覧取得前・タスク完了後などで実行。Compose は api/worker に **`MM_MINUTES_RETENTION_DAYS`**（既定注入 **`:-30`**）を渡す。フロントは **`/api/auth/status` の `minutes_retention_days`** で文言と一致させる |
 | OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
 | API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
 | Ollama 推論（`num_ctx`・タイムアウト） | **`tasks.call_llm`** → **`requests.post`**（**`backend/ollama_client.ollama_generate_url()`**）。**`num_ctx: 4096`**・**`timeout=600`**（コード固定。環境変数では切り替えない） | UI・`metadata` からは変更不可。**`pipeline/02_extract.py`**・**`03_merge.py`** は各自 **`OLLAMA_URL`**／**`NUM_CTX=4096`**・**`REQ_TIMEOUT=600`**（ワーカーと同趣旨）。**VRAM アンロード**: **`try_ollama_unload_model`**・**`OLLAMA_UNLOAD_ON_TASK_END`**（§5.1） |
@@ -267,6 +273,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - API・ワーカー: **`OLLAMA_BASE_URL`**（API は **`/api/tags`**、ワーカーは推論）、**`MM_OPENAI_ENABLED`**
   - ワーカー: `CELERY_BROKER_URL`、`WEBHOOK_URL`
   - メール通知: **`MM_SMTP_*`**（API とワーカーで同一値を推奨）
+  - 議事録 DB 保持: **`MM_MINUTES_RETENTION_DAYS`**（**`database.minutes_retention_days()`**。未設定時は **30**。**183 は 30 として扱う**。**0 以下**で自動削除オフ。Compose 既定 **`:-30`**）
   - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（**`pipeline/02_extract.py`**・**`03_merge.py`**）。いずれも **`_ollama_generate_url()`** で URL を組み立て、**`num_ctx` 4096**・**タイムアウト 600 秒**（**`02_extract`** はペイロード内、**`03_merge`** は **`NUM_CTX` / `REQ_TIMEOUT`**）。**`extract_json_block`** は **`02_extract` 内の関数**（**`tasks.py` に同名関数**があり、ワーカーはそちらを使用。共通化モジュールはない）
   - ローカル開発: リポジトリ直下 `.env` の `VITE_DEV_API_PROXY`（Vite が `/api` を転送する先）
 - **既定値**（例: API の CORS に `localhost:5173`、Celery の `redis://localhost:6379/0`、ワーカーの `OLLAMA_BASE_URL=http://ollama-server:11434`）は **開発・Compose 向けのデフォルト**（`llm-net` 上の Ollama コンテナ名想定）であり、本番では `.env` やオーケストレーション側で上書きすること。
@@ -313,3 +320,4 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.14 | 2026-03-27 | **§6** Ollama モデル UI を**コンボボックスから `<select>` のみ**に変更（手入力不可） |
 | 1.15 | 2026-03-27 | **§5.1**・**§7.1**・**§11** に Ollama **`num_ctx: 4096`**（ワーカー `call_llm`）・**600 秒タイムアウト**、CLI **`pipeline/02_extract.py` / `03_merge.py`** との整合を追記（VRAM／KV 負荷・CPU オフロード抑制のため `8192` から変更） |
 | 1.19 | 2026-03-28 | **コードに合わせて再同期**: **`GET /api/auth/status`** の拡張フィールド、**`ollama_client` と `tasks.call_llm` の役割分担**、**`try_ollama_unload_model` / `OLLAMA_UNLOAD_ON_TASK_END`**、**マージ失敗フォールバック**（`completed`・アンロード非呼び出し）、**`@celery_app.task`**、**`extract_json_block` は tasks と 02_extract に重複**（§2・§4.2・§4.3・§5・§5.1・§6・§7.1・§11） |
+| 1.20 | 2026-03-28 | **議事録保存期限**: **`MM_MINUTES_RETENTION_DAYS`** 既定 **30 日**（約1か月）、**183 → 30 読み替え**、**`minutes_retention_days` / purge**（§7.1・§11）。**`AuthStatusResponse`** に **`minutes_retention_days`**・**`error_report_available`**（§5）。**§5.1** に **`transcript_only`**・**`whisper_preset`**。**§6** にヘルプ、アーカイブ見出し下の保存期間説明、Whisper 品質 UI、**`<select>` の `blur()`** |

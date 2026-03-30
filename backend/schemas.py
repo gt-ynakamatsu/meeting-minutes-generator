@@ -66,6 +66,8 @@ class AuthStatusResponse(BaseModel):
     openai_enabled: bool = True
     # SMTP 設定済みかつ宛先あり（管理者メール or MM_ERROR_REPORT_TO）のとき True
     error_report_available: bool = False
+    # MM_MINUTES_RETENTION_DAYS（未設定時 30≒1か月）。0 以下のとき自動削除は行わない
+    minutes_retention_days: int
 
 
 class ErrorReportRequest(BaseModel):

@@ -37,6 +37,7 @@ import {
   type TaskSubmitMetadata,
 } from "./api";
 import { jobStatusShortLabel, parseJobStatus } from "./jobStatus";
+import { HelpPage, clearHelpHash, openHelpHash, readHelpHash } from "./HelpPage";
 
 const LS_PENDING = "mm_pending_tasks";
 /** ワーカーがエラー破棄したレコードの summary 先頭（一覧の「エラー」フィルタと一致） */
@@ -1334,6 +1335,7 @@ export default function App() {
       emailNotifyFeatureEnabled={authStatus.email_notify_feature_enabled === true}
       emailNotifyAvailable={authStatus.email_notify_available === true}
       errorReportAvailable={authStatus.error_report_available === true}
+      minutesRetentionDays={authStatus.minutes_retention_days}
       authNonce={authNonce}
       onLogout={() => {
         setStoredToken(null);
@@ -1389,7 +1391,10 @@ function OllamaModelField({
         id="mm-ollama-model-select"
         className="mm-ollama-model-select"
         value={selectValue}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          e.currentTarget.blur();
+        }}
         disabled={disabled}
         aria-busy={loading}
       >
@@ -1435,6 +1440,13 @@ function UploadDropIcon({ className }: { className?: string }) {
   );
 }
 
+function archiveRetentionCaption(days: number | undefined): string | null {
+  if (days === undefined || Number.isNaN(days)) return null;
+  if (days <= 0) return "保持期限による自動削除はオフです。";
+  const period = days === 30 ? "約1か月（30日）" : `約 ${days} 日`;
+  return `保存期間は${period}です。作成から経過後、自動削除されます（処理待ち・実行中を除く）。`;
+}
+
 function AppMain({
   showLogout,
   serverOpenaiMode,
@@ -1442,6 +1454,7 @@ function AppMain({
   emailNotifyFeatureEnabled,
   emailNotifyAvailable,
   errorReportAvailable,
+  minutesRetentionDays,
   authNonce,
   onLogout,
 }: {
@@ -1454,6 +1467,8 @@ function AppMain({
   emailNotifyAvailable: boolean;
   /** SMTP 済みかつ管理者メール宛先あり（認証オフ時は MM_ERROR_REPORT_TO） */
   errorReportAvailable: boolean;
+  /** GET /api/auth/status の minutes_retention_days（取得失敗時は未表示） */
+  minutesRetentionDays?: number;
   authNonce: number;
   onLogout: () => void;
 }) {
@@ -1508,6 +1523,7 @@ function AppMain({
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
   const [transcriptOnly, setTranscriptOnly] = useState(false);
   const [whisperPreset, setWhisperPreset] = useState<"fast" | "balanced" | "accurate">("balanced");
+  const [helpVisible, setHelpVisible] = useState(() => readHelpHash());
   const [fileDropActive, setFileDropActive] = useState(false);
   const fileDragDepth = useRef(0);
   const mainFileInputRef = useRef<HTMLInputElement>(null);
@@ -1862,6 +1878,17 @@ function AppMain({
     setSettingsTab("general");
   }, []);
 
+  useEffect(() => {
+    const onHash = () => setHelpVisible(readHelpHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const closeHelp = useCallback(() => {
+    setHelpVisible(false);
+    clearHelpHash();
+  }, []);
+
   const handleDiscardTask = useCallback(
     async (id: string) => {
       if (!window.confirm("このジョブの処理を破棄しますか？\n投入した原稿ファイルはサーバから削除されます。")) return;
@@ -1951,13 +1978,26 @@ function AppMain({
     }
   };
 
+  const archiveRetentionNote = archiveRetentionCaption(minutesRetentionDays);
+
   return (
     <div className="layout layout--app">
+      {helpVisible ? (
+        <HelpPage onClose={closeHelp} version={version} />
+      ) : (
+        <>
       <header className="hero hero--compact">
         <div className="hero-top">
           <div className="hero-top-actions">
             <AccountMenuDropdown
               items={[
+                {
+                  key: "help",
+                  label: "ヘルプ",
+                  onClick: () => {
+                    openHelpHash();
+                  },
+                },
                 {
                   key: "settings",
                   label: "設定",
@@ -2000,7 +2040,12 @@ function AppMain({
             />
           </div>
         </div>
-        <h1>Meeting Minutes Notebook</h1>
+        <div className="hero-title-row">
+          <h1>Meeting Minutes Notebook</h1>
+          <button type="button" className="hero-help-btn" onClick={() => openHelpHash()}>
+            ヘルプ
+          </button>
+        </div>
         <p className="muted hero--tagline">
           <strong>使い方:</strong>
           左のパネルで会議情報・LLM・通知を設定します。右の上ではファイルをクリックまたはドラッグ＆ドロップで選び、「解析をキューに追加」で処理を開始してください。その下の
@@ -2020,7 +2065,13 @@ function AppMain({
           <label>開催日・目安（任意）</label>
           <input value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} placeholder="2025-03-20" />
           <label>分類</label>
-          <select value={category} onChange={(e) => setCategory(e.target.value)}>
+          <select
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value);
+              e.currentTarget.blur();
+            }}
+          >
             {["未分類", "社内", "顧客・社外", "その他"].map((c) => (
               <option key={c} value={c}>
                 {c}
@@ -2030,7 +2081,13 @@ function AppMain({
           <label>タグ（任意）</label>
           <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="カンマ区切り" />
           <label>会議タイププリセット</label>
-          <select value={presetId} onChange={(e) => setPresetId(e.target.value)}>
+          <select
+            value={presetId}
+            onChange={(e) => {
+              setPresetId(e.target.value);
+              e.currentTarget.blur();
+            }}
+          >
             {presetEntries.map(([id, p]) => (
               <option key={id} value={id}>
                 {p.label} ({id})
@@ -2047,7 +2104,13 @@ function AppMain({
             <label>用語・固有名詞</label>
             <textarea value={glossary} onChange={(e) => setGlossary(e.target.value)} />
             <label>文体・トーン</label>
-            <select value={tone} onChange={(e) => setTone(e.target.value)}>
+            <select
+              value={tone}
+              onChange={(e) => {
+                setTone(e.target.value);
+                e.currentTarget.blur();
+              }}
+            >
               {["（指定なし）", "敬体（です・ます）", "常体（である調）", "口語を残しつつ読みやすく"].map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -2058,14 +2121,9 @@ function AppMain({
             <textarea value={actionRules} onChange={(e) => setActionRules(e.target.value)} />
           </details>
 
-          <label style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", margin: "0.75rem 0 0", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={transcriptOnly}
-              onChange={(e) => setTranscriptOnly(e.target.checked)}
-              style={{ marginTop: "0.2rem" }}
-            />
-            <span style={{ fontSize: "0.92rem", lineHeight: 1.5 }}>
+          <label className="sidebar-checkbox-label">
+            <input type="checkbox" checked={transcriptOnly} onChange={(e) => setTranscriptOnly(e.target.checked)} />
+            <span className="sidebar-checkbox-label__text">
               <strong>書き起こしのみ</strong>（.txt / .srt は読み取り、動画・音声は Whisper のみ。議事録は作らない）
             </span>
           </label>
@@ -2079,8 +2137,8 @@ function AppMain({
           <div className="mm-whisper-settings-wrap">
             <div className="mm-whisper-hint" id="mm-whisper-hint" role="tooltip">
               動画・音声を <strong>Whisper</strong> で文字起こしするときの「探索の強さ」です。ビーム幅や候補数を変え、
-              <strong>高精度</strong>にすると誤変換が減りやすい反面、<strong>GPU／CPU の負荷と待ち時間が伸びがち</strong>
-              です。<strong>高速</strong>は逆に短時間向けです。モデルサイズ（環境変数 <code>WHISPER_MODEL</code>
+              <strong>高精度</strong>にすると誤変換が減りやすい反面、<strong>GPU／CPU の負荷と待ち時間は大きくなります</strong>。
+              <strong>高速</strong>は処理が速い一方、精度はやや落ちることがあります。モデルサイズ（環境変数 <code>WHISPER_MODEL</code>
               など）も結果に大きく効きます。.txt / .srt を直接渡す場合はこの設定は使われません。
             </div>
             <label className="mm-whisper-settings-label" htmlFor="mm-whisper-preset">
@@ -2089,12 +2147,15 @@ function AppMain({
             <select
               id="mm-whisper-preset"
               value={whisperPreset}
-              onChange={(e) => setWhisperPreset(e.target.value as "fast" | "balanced" | "accurate")}
+              onChange={(e) => {
+                setWhisperPreset(e.target.value as "fast" | "balanced" | "accurate");
+                e.currentTarget.blur();
+              }}
               aria-describedby="mm-whisper-hint"
             >
-              <option value="fast">高速（待ち時間を短くしがち）</option>
+              <option value="fast">高速（所要時間は短め）</option>
               <option value="balanced">標準（バランス）</option>
-              <option value="accurate">高精度（精度を優先・時間がかかりがち）</option>
+              <option value="accurate">高精度（精度優先・所要時間は長め）</option>
             </select>
             <p className="muted mm-whisper-footnote">動画・音声ファイルを処理するときのみ効きます。</p>
           </div>
@@ -2110,7 +2171,10 @@ function AppMain({
               <label>AI の接続先</label>
               <select
                 value={llmProvider}
-                onChange={(e) => setLlmProvider(e.target.value as "ollama" | "openai")}
+                onChange={(e) => {
+                  setLlmProvider(e.target.value as "ollama" | "openai");
+                  e.currentTarget.blur();
+                }}
               >
                 <option value="ollama">ローカル（Ollama）</option>
                 <option value="openai">OpenAI API</option>
@@ -2126,7 +2190,13 @@ function AppMain({
                     <label>OpenAI API キー</label>
                     <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
                     <label>OpenAI モデル</label>
-                    <select value={openaiModel} onChange={(e) => setOpenaiModel(e.target.value)}>
+                    <select
+                      value={openaiModel}
+                      onChange={(e) => {
+                        setOpenaiModel(e.target.value);
+                        e.currentTarget.blur();
+                      }}
+                    >
                       {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
                         <option key={m} value={m}>
                           {m}
@@ -2169,6 +2239,7 @@ function AppMain({
               const v = e.target.value as "browser" | "webhook" | "email" | "none";
               setNotification(v);
               if (v === "browser") syncNotifPermission();
+              e.currentTarget.blur();
             }}
           >
             <option value="browser">ブラウザ</option>
@@ -2413,7 +2484,12 @@ function AppMain({
         </div>
 
         <section className="main-pane-archive" aria-label="議事録アーカイブ">
-          <h2 className="main-subhead">議事録アーカイブ</h2>
+          <div className="main-archive-head">
+            <h2 className="main-subhead">議事録アーカイブ</h2>
+            {archiveRetentionNote ? (
+              <p className="muted main-archive-retention">{archiveRetentionNote}</p>
+            ) : null}
+          </div>
           <div className="filters filters--tight">
             <input placeholder="キーワード検索" value={search} onChange={(e) => setSearch(e.target.value)} />
             <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
@@ -2450,6 +2526,10 @@ function AppMain({
         </section>
       </main>
       </div>
+        </>
+      )}
+
+      <footer className="footer footer--app">Meeting Minutes Generator · v{version || "…"}</footer>
 
       <SettingsDrawer
         open={settingsOpen}
@@ -2526,7 +2606,13 @@ function AppMain({
               autoComplete="off"
             />
             <label>モデル</label>
-            <select value={profileOpenaiModel} onChange={(e) => setProfileOpenaiModel(e.target.value)}>
+            <select
+              value={profileOpenaiModel}
+              onChange={(e) => {
+                setProfileOpenaiModel(e.target.value);
+                e.currentTarget.blur();
+              }}
+            >
               {["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o4-mini", "o3-mini"].map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -2682,8 +2768,6 @@ function AppMain({
           </section>
         ) : null}
       </SettingsDrawer>
-
-      <footer className="footer footer--app">Meeting Minutes Generator · v{version || "…"}</footer>
     </div>
   );
 }

@@ -36,15 +36,22 @@ def validate_registry_login_email(s: str) -> None:
         raise ValueError("メールアドレスの形式が正しくありません")
 
 
+# 環境変数未設定・不正時の議事録保持日数（約1か月）。MM_MINUTES_RETENTION_DAYS で上書き可。
+DEFAULT_MINUTES_RETENTION_DAYS = 30
+
+
 def minutes_retention_days() -> int:
-    """議事録の保持日数。MM_MINUTES_RETENTION_DAYS（未設定時 183≒半年）。0 以下で自動削除を無効。"""
+    """議事録の保持日数。MM_MINUTES_RETENTION_DAYS（未設定時は DEFAULT_MINUTES_RETENTION_DAYS）。0 以下で自動削除を無効。"""
     raw = (os.getenv("MM_MINUTES_RETENTION_DAYS") or "").strip()
     if not raw:
-        return 183
+        return DEFAULT_MINUTES_RETENTION_DAYS
     try:
         n = int(raw, 10)
     except ValueError:
-        return 183
+        return DEFAULT_MINUTES_RETENTION_DAYS
+    # 旧既定 MM_MINUTES_RETENTION_DAYS=183（約半年）の .env が残っている環境を、現行の約1か月に揃える
+    if n == 183:
+        return DEFAULT_MINUTES_RETENTION_DAYS
     return n
 
 

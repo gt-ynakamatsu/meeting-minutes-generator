@@ -85,6 +85,8 @@ export interface AuthStatus {
   openai_enabled?: boolean;
   /** SMTP 済みかつ管理者宛先あり（または MM_ERROR_REPORT_TO）のとき true */
   error_report_available?: boolean;
+  /** MM_MINUTES_RETENTION_DAYS（既定 30≒1か月）。0 以下で自動削除なし */
+  minutes_retention_days?: number;
 }
 
 export interface AuthMe {

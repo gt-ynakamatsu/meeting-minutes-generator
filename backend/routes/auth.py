@@ -31,6 +31,7 @@ def auth_status():
     email_ok = email_feat and smtp_notify.smtp_configured()
     oa = feature_flags.openai_feature_enabled()
     er = _error_report_available()
+    retention = db.minutes_retention_days()
     if not auth_enabled():
         return AuthStatusResponse(
             auth_required=False,
@@ -40,6 +41,7 @@ def auth_status():
             email_notify_available=email_ok,
             openai_enabled=oa,
             error_report_available=er,
+            minutes_retention_days=retention,
         )
     n = db.count_users()
     return AuthStatusResponse(
@@ -50,6 +52,7 @@ def auth_status():
         email_notify_available=email_ok,
         openai_enabled=oa,
         error_report_available=er,
+        minutes_retention_days=retention,
     )
 
 

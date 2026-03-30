@@ -160,9 +160,9 @@ with st.sidebar:
     )
 
     _whisper_labels = {
-        "高速（待ち時間を短くしがち）": "fast",
+        "高速（所要時間は短め）": "fast",
         "標準（バランス）": "balanced",
-        "高精度（精度を優先・時間がかかりがち）": "accurate",
+        "高精度（精度優先・所要時間は長め）": "accurate",
     }
     _whisper_choice = st.selectbox(
         "音声認識の品質（Whisper）",
@@ -170,7 +170,7 @@ with st.sidebar:
         index=1,
         help=(
             "動画・音声を Whisper で文字起こしするときの探索の強さです。"
-            "高精度にすると誤変換が減りやすい一方、GPU／CPU の負荷と待ち時間が伸びがちです。"
+            "高精度にすると誤変換が減りやすい一方、GPU／CPU の負荷と待ち時間は大きくなります。"
             " .txt / .srt を直接渡す場合は使われません。"
         ),
         key="whisper_preset_ui",

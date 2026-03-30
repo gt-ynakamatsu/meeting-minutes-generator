@@ -165,13 +165,37 @@ body {
   color: var(--muted);
 }
 
+/* ブロック型ラベルと見た目を揃えないオプション行（書き起こしのみ 等） */
+.sidebar label.sidebar-checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0;
+  cursor: pointer;
+  font-size: 0.92rem;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.sidebar label.sidebar-checkbox-label input[type="checkbox"] {
+  margin-top: 0.12rem;
+}
+
+.sidebar label.sidebar-checkbox-label strong {
+  font-weight: 650;
+}
+
+.sidebar-checkbox-label__text {
+  line-height: 1.5;
+}
+
 .sidebar select:disabled {
   opacity: 0.8;
   cursor: not-allowed;
   color: var(--muted);
 }
 
-.sidebar input,
+.sidebar input:not([type="checkbox"]),
 .sidebar select,
 .sidebar textarea {
   width: 100%;
@@ -182,6 +206,28 @@ body {
   background-color: #fff;
   box-shadow: 0 1px 2px rgba(27, 67, 50, 0.06);
   color: var(--text);
+}
+
+/* テキスト系 input と違い、チェックボックスはネイティブサイズ（全幅の枠を付けない） */
+.sidebar input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  min-width: 1.05rem;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid rgba(27, 67, 50, 0.32);
+  border-radius: 4px;
+  background-color: #fff;
+  box-shadow: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+  vertical-align: top;
+}
+
+.sidebar input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .sidebar input:focus-visible,
@@ -371,6 +417,26 @@ body {
   margin: 0 0 0.25rem;
   font-size: 0.95rem;
   font-weight: 700;
+}
+
+.main-archive-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.main-archive-head .main-subhead {
+  margin-bottom: 0;
+}
+
+.main-archive-retention {
+  margin: 0;
+  max-width: 42rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .main-file-picker--upload {
@@ -874,7 +940,8 @@ body {
 }
 
 .footer--app {
-  grid-column: auto;
+  grid-column: 1 / -1;
+  grid-row: 3;
   padding: 0.15rem 0 0;
   flex-shrink: 0;
 }
@@ -1216,7 +1283,7 @@ body {
   color: var(--muted);
 }
 
-.settings-drawer-body input,
+.settings-drawer-body input:not([type="checkbox"]),
 .settings-drawer-body select,
 .settings-drawer-body textarea {
   width: 100%;
@@ -1225,6 +1292,20 @@ body {
   border: 1px solid var(--border);
   font: inherit;
   box-sizing: border-box;
+}
+
+.settings-drawer-body input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  min-width: 1.05rem;
+  margin: 0 0.35rem 0 0;
+  padding: 0;
+  border: 1px solid rgba(27, 67, 50, 0.32);
+  border-radius: 4px;
+  box-shadow: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+  vertical-align: middle;
 }
 
 .settings-drawer-body .btn-secondary {
@@ -1238,6 +1319,136 @@ body {
   width: auto;
   display: inline-block;
   min-width: 8rem;
+}
+
+/* ヘルプページ（#help） */
+.hero-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  margin: 0.35rem 0 0.25rem;
+}
+
+.hero-title-row h1 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: min(100%, 12rem);
+}
+
+.hero-help-btn {
+  flex: 0 0 auto;
+  padding: 0.35rem 0.85rem;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(45, 106, 79, 0.08);
+  border: 1px solid rgba(45, 106, 79, 0.35);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.hero-help-btn:hover {
+  background: rgba(45, 106, 79, 0.14);
+}
+
+.help-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 0.25rem 1rem 2rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+/* ヘルプ単独表示時にグリッドのメイン行を占有（フッタは次行へ） */
+.layout--app > .help-page {
+  grid-column: 1 / -1;
+  grid-row: 1 / 3;
+  max-height: none;
+}
+
+.help-page__head {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  padding: 0.5rem 0 0.85rem;
+  margin-bottom: 0.25rem;
+  background: linear-gradient(180deg, #f7faf8 0%, #f7faf8 85%, transparent 100%);
+  border-bottom: 1px solid var(--border);
+}
+
+.help-page__back {
+  width: auto;
+  margin: 0 0 0.65rem;
+}
+
+.help-page__title {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+  color: var(--accent);
+}
+
+.help-page__lede {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.help-page__article {
+  font-size: 0.92rem;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.help-page__article h2 {
+  margin: 1.35rem 0 0.5rem;
+  font-size: 1.05rem;
+  color: var(--accent);
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(27, 67, 50, 0.12);
+}
+
+.help-page__article h2:first-child {
+  margin-top: 0.5rem;
+}
+
+.help-page__article p {
+  margin: 0.45rem 0;
+}
+
+.help-page__article ul {
+  margin: 0.4rem 0;
+  padding-left: 1.35rem;
+}
+
+.help-page__article li {
+  margin: 0.25rem 0;
+}
+
+.help-page__article hr {
+  margin: 1.25rem 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.help-page__article code {
+  font-size: 0.88em;
+  padding: 0.08em 0.3em;
+  border-radius: 4px;
+  background: rgba(27, 67, 50, 0.07);
+}
+
+.help-page__article strong {
+  font-weight: 650;
+}
+
+.help-page__version {
+  margin: 2rem 0 0;
+  font-size: 0.82rem;
 }
 
 /* 解析設定: Whisper 品質 — ホバー／フォーカス時に説明パネル */

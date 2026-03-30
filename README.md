@@ -8,7 +8,7 @@
 *   **構造化フォーマット**: 議事録は Markdown 形式で出力され、決定事項・課題・アクション・重要メモに分類されます。
 *   **マルチフォーマット対応**: 動画/音声ファイルだけでなく、SRT（字幕ファイル）やテキストファイルからの議事録作成もサポートしています。
 *   **自動文字起こし**: OpenAI製の高性能音声認識モデル [Faster Whisper](https://github.com/guillaumekln/faster-whisper) を使用し、GPU活用で高速・高精度にテキスト化します。
-*   **アーカイブ機能**: 過去の議事録をデータベースに保存し、ブラウザ上で閲覧・Markdown形式 (`.md`) でのダウンロードが可能です。
+*   **アーカイブ機能**: 過去の議事録をデータベースに保存し、ブラウザ上で閲覧・Markdown（`.md`）ダウンロード。**保存期限**は **`MM_MINUTES_RETENTION_DAYS`**（既定 **30 日**。環境変数・挙動は下表と設計書 `document/frontend_backend_design.md` §7.1）。
 *   **完全ローカル処理**: データはすべて社内のサーバー内で処理・保存されるため、機密情報が外部に漏れる心配はありません。
 *   **モデル切り替え**: 要約・統合は Ollama（モデル名指定可）または OpenAI API から選択できます。
 *   **フォーマット差し替え**: 社内テンプレに合わせて `prompt_extract` / `prompt_merge` 相当の `.txt` をアップロードして利用できます（プレースホルダはアプリ内ヘルプ参照）。
@@ -16,7 +16,11 @@
 *   **会議メタ＆コンテキスト**: 議題・分類・タグに加え、目的・参加者・用語・トーンなどを入力すると抽出・統合プロンプトに反映されます。
 *   **プリセット**: `presets_builtin.json` の会議タイプ（定例・顧客・1on1 等）を選べます。追記・編集で社内用に拡張可能です。
 *   **テキスト / SRT 入力**: 文字起こし済みの `.txt` や `.srt` だけでも議事録生成できます（Whisper をスキップ）。
-*   **アーカイブ**: 検索・フィルタ、処理キュー表示、議事録の手直し保存に対応しています。
+*   **書き起こしのみ**: チェックで **Whisper（または .txt/.srt 読み取り）まで**とし、議事録用 LLM（抽出・統合）は実行しません。
+*   **音声認識の品質（Whisper）**: **高速 / 標準 / 高精度**（`whisper_preset`）で faster-whisper の探索の強さを切り替え（動画・音声のみ）。
+*   **アーカイブ**: 検索・フィルタ、処理キュー表示、議事録の手直し保存に対応。見出し下に **保存期間の説明**（サーバの `minutes_retention_days` と一致）を表示します。
+*   **ヘルプ**: メイン画面の **ヘルプ**（`#help`）から **`HelpPage`** を開き、操作手順に加え **ブラウザ通知の有効化**・**サイト設定**・**HTTPS / 社内 CA 証明書のインストール（Windows）** などを参照できます。
+*   **デスクトップ通知**: 通知先 **ブラウザ** を選ぶと、ジョブ完了時に OS 通知を出せます（Chromium 系は **安全なページ**＝多くの場合 **HTTPS** または **localhost / 127.0.0.1** が必要。`http://` の IP や社内ホスト名のみでは無効になりやすい）。詳細はアプリ内ヘルプの「ブラウザ通知を有効にする手順」を参照してください。
 *   **フロント／API 分離**: UI は **React（`frontend/`）**、HTTP API は **FastAPI（`backend/`）**。構成・エンドポイントは **[設計書 `document/frontend_backend_design.md`](document/frontend_backend_design.md)** を参照。
 *   **UI デザインモック（静的）**: Docker なしで確認する場合は **`design/ui-mockup.html`** をブラウザで開く（Windows は `design/open-mockup.bat`）。
 
@@ -47,6 +51,7 @@ cd meeting-minutes-generator
 | **ポート（環境依存）** | 既定ではブラウザ **`http://localhost:8085`** で UI にアクセスします。8085 が既に使われている場合は、起動**前**にプロジェクト直下で `.env` を用意し **`MM_FRONTEND_PORT`** を変更してください（`.env.example` 参照）。 |
 | **CORS（本番・社内 URL）** | ブラウザから **別ホスト名・HTTPS** で API にアクセスする場合は、起動**前**に **`MM_CORS_ORIGINS`**（カンマ区切り）にそのオリジンを含めてください。ローカルだけなら既定のままで可。 |
 | **Webhook（任意）** | 完了通知を使う場合は **`.env` の `WEBHOOK_URL`** に実 URL を書く（`docker-compose.yml` は `${WEBHOOK_URL}` を参照）。未使用ならプレースホルダのままで可。 |
+| **議事録の保持期限（任意）** | **`MM_MINUTES_RETENTION_DAYS`** … 未指定時 **30**（日）。**0 以下**で自動削除なし。api / worker に渡す（`docker-compose.yml` の **`:-30`**）。 |
 | **メール通知（任意）** | UI で「メール」を選べるのは **`MM_SMTP_HOST` と `MM_SMTP_FROM`** 等が設定されているとき。完了メールの送信は **Celery ワーカー**が行うため、**api と worker の両方**に同じ SMTP 環境変数を渡す（`.env.example` 参照）。ログイン時は通知先の既定が **ログイン ID（メール）**。 |
 | **.env（任意）** | プロジェクト直下の `.env` を Compose が自動読み込み。**GT-2222 では既定として `config/gt-2222.env` をコピー**するのがおすすめ（`cp config/gt-2222.env .env`）。汎用テンプレは `.env.example`。 |
 | **ログイン認証** | **`MM_AUTH_SECRET`** があると JWT ログインが有効になり、**ユーザーごとに `data/user_data/.../minutes.db` に議事録が分離**されます。`docker compose` では未指定時も **既定のフォールバック秘密鍵で認証 ON**（本番は `openssl rand -hex 32` 等で必ず差し替え）。初回はブラウザの初回セットアップまたは `MM_BOOTSTRAP_ADMIN_*` で管理者を作成。 |
@@ -102,6 +107,10 @@ docker exec ollama-server ollama pull qwen2.5:7b
 
 [http://localhost:8085](http://localhost:8085)
 
+**ブラウザ通知**を使う場合は、左パネルで通知を **ブラウザ** にし、表示に従って **許可** してください。`http://192.168.x.x` 等では通知 API が無効になりやすいので、**HTTPS** 化するか **localhost / 127.0.0.1** で試すか、**Webhook・メール**に切り替えてください。手順・証明書（社内 CA）の詳細は画面の **ヘルプ** を開いてください。
+
+**サブパス配信**（例: `/meetingminutesnotebook/`）では、フロント再ビルド前に **`.env` の `VITE_BASE_PATH` / `VITE_API_BASE`** を実 URL に合わせます（GT-2222 向けは `config/gt-2222.env` 参照。設計・TLS の詳細は `document/frontend_backend_design.md` §11.1、`document/gt2222_https_subpath_troubleshooting.md`）。
+
 ### 6. ローカル開発（API + フロントのみ）
 
 * API: `pip install -r requirements-api.txt` のうえ `uvicorn backend.main:app --reload --port 8000`（プロジェクトルートで実行）
@@ -133,6 +142,11 @@ docker exec ollama-server ollama pull qwen2.5:7b
 | `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` | 任意。API 起動時にユーザー 0 件なら最初の管理者を自動登録 |
 | `MM_AUTH_TOKEN_HOURS` | JWT 有効時間（既定 168） |
 | `MM_AUTH_SELF_REGISTER` | `1`（既定）で 1 人目以降が **自分で新規登録** 可能。`0` / `false` で無効（管理者追加のみ） |
+| `MM_MINUTES_RETENTION_DAYS` | 議事録レコードの保持日数。**未指定時 30**。**183** は **30 日として扱う**（旧既定からの移行）。**0 以下**で自動削除オフ |
+| `MM_OPENAI_ENABLED` | `0` / `false` 等で OpenAI 連携オフ（UI・API で Ollama のみ）。未設定時はオン扱い（後方互換） |
+| `MM_EMAIL_NOTIFY_ENABLED` | `1` でメール通知を UI に出す（SMTP 必須）。詳細は `.env.example` |
+| `VITE_BASE_PATH` / `VITE_API_BASE` | 本番フロントビルド時。**サブパス配信**で必須。末尾スラッシュの有無は `VITE_BASE_PATH` のみ（`VITE_API_BASE` は末尾なし推奨） |
+| `VITE_ALT_APP_HOSTNAME` | 任意。通知案内などで **名前付き URL** へのリンクを出すときのホスト名 |
 | `VITE_DEV_API_PROXY` | フロント開発時、`/api` のプロキシ先（既定 `http://127.0.0.1:8000`） |
 
 `frontend/nginx.conf` の `api:8000` や Compose のサービス名 **`redis`** は **コンテナ間の DNS 名**であり、特定の実サーバー名を直書きしているわけではありません。
@@ -170,11 +184,15 @@ python3 03_merge.py
 
 ## ディレクトリ構成
 
-*   `app.py`: Streamlit フロントエンド（Markdown表示・DL機能付き）
-*   `tasks.py`: AI議事録生成パイプライン（Celeryワーカー）
+*   `frontend/`: **React（Vite）** SPA。本番は Nginx で `dist` を配信。ヘルプ本文は `frontend/src/HelpPage.tsx`（ブラウザ通知・証明書手順を含む）
+*   `backend/`: **FastAPI**（`main.py`・`routes/`）。`GET /api/auth/status` に **`minutes_retention_days`** 等を返し、UI の保存期間表示と整合
+*   `database.py`: SQLite・**議事録の保持期限**（`minutes_retention_days` / purge）・認証時のユーザー別 `minutes.db`
+*   `app.py`: Streamlit フロントエンド（レガシー。Markdown 表示・DL）
+*   `tasks.py`: AI 議事録生成パイプライン（Celery ワーカー）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`: 抽出フェーズ用プロンプト
 *   `prompts/prompt_merge.txt`: 統合フェーズ用プロンプト
+*   `document/`: **設計書**（`frontend_backend_design.md`・`architecture_design.md`・`design_spec.md` など）
 *   `scripts/`: デプロイ・クリーンアップ等の補助スクリプト
 
 ## 環境の削除
