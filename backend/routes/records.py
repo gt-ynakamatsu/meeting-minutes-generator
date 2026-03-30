@@ -3,13 +3,15 @@
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 import database as db
 from backend.deps import ApiUser
 from backend.http_utils import content_disposition_attachment, sqlite_row_to_dict
-from backend.schemas import SummaryPatch
+from backend.schemas import RecordsPageResponse, SummaryPatch
 from celery_app import celery_app
 
 router = APIRouter(tags=["records"])
@@ -29,22 +31,34 @@ def _queue_row_for_api(row) -> dict:
     return d
 
 
-@router.get("/api/records")
+@router.get("/api/records", response_model=RecordsPageResponse)
 def list_records(
     _auth: ApiUser,
     days: int = 7,
     search: str = "",
     category: str = "",
     status_filter: str = "",
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
-    rows = db.get_recent_records(
-        _auth or "",
+    owner = (_auth or "").strip()
+    total = db.count_recent_records(
+        owner,
         days=days,
         search=search,
         category=category,
         status_filter=status_filter,
     )
-    return [sqlite_row_to_dict(r) for r in rows]
+    rows = db.get_recent_records(
+        owner,
+        days=days,
+        search=search,
+        category=category,
+        status_filter=status_filter,
+        limit=limit,
+        offset=offset,
+    )
+    return RecordsPageResponse(items=[sqlite_row_to_dict(r) for r in rows], total=total)
 
 
 @router.get("/api/queue")

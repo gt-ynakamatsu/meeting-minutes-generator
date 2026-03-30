@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -129,3 +129,10 @@ class RecordsQuery(BaseModel):
     search: str = ""
     category: str = ""
     status_filter: Literal["", "completed", "error", "processing"] = ""
+
+
+class RecordsPageResponse(BaseModel):
+    """GET /api/records … 一覧は items、フィルタ一致の総件数は total（ページング用）。"""
+
+    items: list[dict[str, Any]]
+    total: int
