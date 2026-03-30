@@ -26,6 +26,8 @@ class TaskSubmitMetadata(BaseModel):
     tags: str = ""
     preset_id: str = "standard"
     context: MeetingContext = Field(default_factory=MeetingContext)
+    # faster-whisper のビーム探索など。動画・音声の文字起こし時のみワーカーで解釈
+    whisper_preset: Literal["fast", "balanced", "accurate"] = "balanced"
     # True のとき書き起こしまで（.txt/.srt 読込 or Whisper）で完了し、議事録用 LLM は実行しない
     transcript_only: bool = False
     # 旧 API 名（誤解を招くが互換のため残す）。True なら transcript_only と同義
@@ -62,6 +64,15 @@ class AuthStatusResponse(BaseModel):
     email_notify_available: bool = False
     # MM_OPENAI_ENABLED がオフのとき False（フロントで OpenAI UI を隠す）
     openai_enabled: bool = True
+    # SMTP 設定済みかつ宛先あり（管理者メール or MM_ERROR_REPORT_TO）のとき True
+    error_report_available: bool = False
+
+
+class ErrorReportRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    detail: str = Field(default="", max_length=12000)
+    page_url: str = Field(default="", max_length=2000)
+    client_version: str = Field(default="", max_length=64)
 
 
 class BootstrapRequest(BaseModel):
