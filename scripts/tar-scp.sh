@@ -17,7 +17,9 @@
 # 環境変数: DEPLOY_HOST / DEPLOY_USER / DEPLOY_PATH / DEPLOY_SSH
 # 出力ファイルを固定: TAR_SCP_OUT=/tmp/mm.tgz ./scripts/tar-scp.sh
 # ローカル .tar.gz を残す: TAR_SCP_KEEP_LOCAL=1 ./scripts/tar-scp.sh
-# 解凍後にリモートのアーカイブを削除: TAR_SCP_RM_REMOTE=1 ./scripts/tar-scp.sh
+# 既定では解凍後にリモートのアーカイブを削除（残したい場合）:
+#   TAR_SCP_KEEP_REMOTE=1 ./scripts/tar-scp.sh
+# 互換: TAR_SCP_RM_REMOTE=0 でも削除を抑止
 # 転送のみ（解凍しない）: TAR_SCP_SKIP_EXTRACT=1 ./scripts/tar-scp.sh
 #
 # docker compose が読む .env は .gitignore のため tar に含まれないことが多い。
@@ -108,7 +110,13 @@ echo "==> scp → ${REMOTE_TARGET}"
 
 if [[ -z "${TAR_SCP_SKIP_EXTRACT:-}" ]]; then
   _EXTRACT="${_REMOTE_CD} && tar xzf $(printf '%q' "${ARCHIVE_BASENAME}")"
-  if [[ "${TAR_SCP_RM_REMOTE:-}" == "1" ]]; then
+  # 既定は「解凍後にリモート tar を削除」。
+  # 明示的に残したい場合のみ抑止する。
+  _RM_REMOTE_AFTER_EXTRACT=1
+  if [[ "${TAR_SCP_KEEP_REMOTE:-}" == "1" || "${TAR_SCP_RM_REMOTE:-}" == "0" ]]; then
+    _RM_REMOTE_AFTER_EXTRACT=0
+  fi
+  if [[ "${_RM_REMOTE_AFTER_EXTRACT}" -eq 1 ]]; then
     _EXTRACT+=" && rm -f $(printf '%q' "${ARCHIVE_BASENAME}")"
   fi
   echo "==> ${REMOTE}: 解凍 ${ARCHIVE_BASENAME}"
