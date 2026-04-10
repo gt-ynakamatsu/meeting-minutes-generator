@@ -152,7 +152,7 @@ def _migrate_usage_tables(conn):
             transcript_only INTEGER NOT NULL,
             llm_provider TEXT NOT NULL,
             model_name TEXT NOT NULL DEFAULT '',
-            whisper_preset TEXT NOT NULL DEFAULT 'balanced',
+            whisper_preset TEXT NOT NULL DEFAULT 'accurate',
             media_kind TEXT NOT NULL DEFAULT ''
         )
         """
@@ -167,7 +167,45 @@ def _migrate_usage_tables(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS suggestion_box_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            author_email TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL,
+            page_url TEXT NOT NULL DEFAULT '',
+            client_version TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'new',
+            admin_note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_job_log_created ON usage_job_log(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestion_box_created ON suggestion_box_entries(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestion_box_status ON suggestion_box_entries(status)")
+    _migrate_usage_job_metrics_columns(conn)
+
+
+def _migrate_usage_job_metrics_columns(conn):
+    """稟議・キャパシティ用: 投入ファイルサイズ・媒体長・Whisper/LLM 壁時計など（本文は保存しない）。"""
+    cur = conn.execute("PRAGMA table_info(usage_job_log)")
+    existing = {row[1] for row in cur.fetchall()}
+    additions = [
+        ("input_bytes", "INTEGER"),
+        ("media_duration_sec", "REAL"),
+        ("audio_extract_wall_sec", "REAL"),
+        ("whisper_wall_sec", "REAL"),
+        ("transcript_chars", "INTEGER"),
+        ("extract_llm_sec", "REAL"),
+        ("merge_llm_sec", "REAL"),
+        ("llm_chunks", "INTEGER"),
+    ]
+    for col, decl in additions:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE usage_job_log ADD COLUMN {col} {decl}")
 
 
 def _ensure_at_least_one_admin(conn):
@@ -711,6 +749,73 @@ def get_active_queue_records(owner: str = "", days=7, limit=30):
         ).fetchall()
 
 
+def _queue_rows_from_minutes_path(path: str, since: datetime) -> list[sqlite3.Row]:
+    if not os.path.isfile(path):
+        return []
+    purge_expired_minutes_db_path(path)
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            """
+            SELECT * FROM records
+            WHERE created_at > ?
+              AND (status = 'pending' OR status LIKE 'processing%')
+            ORDER BY created_at ASC
+            """,
+            (since,),
+        ).fetchall()
+
+
+def get_active_queue_records_global(viewer: str = "", days: int = 7, limit: int = 80) -> list[dict[str, Any]]:
+    """認証あり運用向け: 全登録ユーザーの DB・レガシー `data/minutes.db`・registry 外の `user_data/*/minutes.db` を走査し、
+    待機・処理中を受付時刻順でマージする。各 dict はレコード列に加え `job_owner`（ログイン ID・レガシーは null）と `is_mine` を含む。
+    """
+    since = datetime.now() - timedelta(days=days)
+    viewer_n = registry_login_normalize(viewer) if (viewer or "").strip() else ""
+
+    pairs: list[tuple[str, sqlite3.Row]] = []
+    registry_paths_norm: set[str] = set()
+
+    for u in list_registry_users():
+        un = (u.get("username") or "").strip()
+        if not un:
+            continue
+        path = minutes_db_path(un)
+        registry_paths_norm.add(os.path.normpath(path))
+        for r in _queue_rows_from_minutes_path(path, since):
+            pairs.append((un, r))
+
+    pattern = os.path.join(DATA_DIR, "user_data", "*", "minutes.db")
+    for path in glob.glob(pattern):
+        norm = os.path.normpath(path)
+        if norm in registry_paths_norm:
+            continue
+        label = os.path.basename(os.path.dirname(path))
+        for r in _queue_rows_from_minutes_path(path, since):
+            pairs.append((label, r))
+
+    leg_norm = os.path.normpath(LEGACY_MINUTES_PATH)
+    if os.path.isfile(LEGACY_MINUTES_PATH) and leg_norm not in registry_paths_norm:
+        for r in _queue_rows_from_minutes_path(LEGACY_MINUTES_PATH, since):
+            pairs.append(("", r))
+
+    pairs.sort(key=lambda pr: (str(pr[1]["created_at"] or ""), pr[1]["id"]))
+
+    out: list[dict[str, Any]] = []
+    for owner_label, row in pairs[:limit]:
+        d: dict[str, Any] = {k: row[k] for k in row.keys()}
+        d["job_owner"] = owner_label if owner_label else None
+        if viewer_n:
+            if owner_label:
+                d["is_mine"] = registry_login_normalize(owner_label) == viewer_n
+            else:
+                d["is_mine"] = registry_login_normalize(str(d.get("email") or "")) == viewer_n
+        else:
+            d["is_mine"] = True
+        out.append(d)
+    return out
+
+
 def get_record(task_id, owner: str = ""):
     path = minutes_db_path(owner)
     if not os.path.exists(path):
@@ -759,8 +864,9 @@ def record_usage_job_submission(
     transcript_only: bool,
     llm_provider: str,
     model_name: str,
-    whisper_preset: str = "balanced",
+    whisper_preset: str = "accurate",
     original_filename: str = "",
+    input_bytes: Optional[int] = None,
 ) -> None:
     """認証が有効なときのみ registry に 1 行記録（タスク投入時）。議事録・書き起こし本文は含めない。"""
     if not _auth_secret_configured():
@@ -778,18 +884,68 @@ def record_usage_job_submission(
     model = (model_name or "").strip()
     if not model:
         model = "gpt-4o-mini" if prov == "openai" else ""
-    wp = (whisper_preset or "balanced").strip() or "balanced"
+    wp = (whisper_preset or "accurate").strip() or "accurate"
     mk = usage_media_kind_from_filename(original_filename)
+    ib = int(input_bytes) if input_bytes is not None and int(input_bytes) >= 0 else None
     try:
         with sqlite3.connect(REGISTRY_DB_PATH) as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO usage_job_log
-                (task_id, user_email, transcript_only, llm_provider, model_name, whisper_preset, media_kind)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, user_email, transcript_only, llm_provider, model_name, whisper_preset, media_kind, input_bytes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (tid, user_key, 1 if transcript_only else 0, prov, model, wp, mk),
+                (tid, user_key, 1 if transcript_only else 0, prov, model, wp, mk, ib),
             )
+    except sqlite3.OperationalError:
+        pass
+
+
+def update_usage_job_metrics(
+    task_id: str,
+    *,
+    input_bytes: Optional[int] = None,
+    media_duration_sec: Optional[float] = None,
+    audio_extract_wall_sec: Optional[float] = None,
+    whisper_wall_sec: Optional[float] = None,
+    transcript_chars: Optional[int] = None,
+    extract_llm_sec: Optional[float] = None,
+    merge_llm_sec: Optional[float] = None,
+    llm_chunks: Optional[int] = None,
+) -> None:
+    """ジョブ完了時に 1 回更新（認証・registry 有効時のみ）。失敗ジョブは呼ばなくてよい。"""
+    if not _auth_secret_configured():
+        return
+    tid = (task_id or "").strip()
+    if not tid:
+        return
+    init_registry_db()
+    if not os.path.exists(REGISTRY_DB_PATH):
+        return
+    fields: list[tuple[str, Any]] = []
+    if input_bytes is not None:
+        fields.append(("input_bytes", int(input_bytes)))
+    if media_duration_sec is not None:
+        fields.append(("media_duration_sec", float(media_duration_sec)))
+    if audio_extract_wall_sec is not None:
+        fields.append(("audio_extract_wall_sec", float(audio_extract_wall_sec)))
+    if whisper_wall_sec is not None:
+        fields.append(("whisper_wall_sec", float(whisper_wall_sec)))
+    if transcript_chars is not None:
+        fields.append(("transcript_chars", int(transcript_chars)))
+    if extract_llm_sec is not None:
+        fields.append(("extract_llm_sec", float(extract_llm_sec)))
+    if merge_llm_sec is not None:
+        fields.append(("merge_llm_sec", float(merge_llm_sec)))
+    if llm_chunks is not None:
+        fields.append(("llm_chunks", int(llm_chunks)))
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = ?" for k, _ in fields)
+    vals = [v for _, v in fields] + [tid]
+    try:
+        with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+            conn.execute(f"UPDATE usage_job_log SET {sets} WHERE task_id = ?", vals)
     except sqlite3.OperationalError:
         pass
 
@@ -798,6 +954,26 @@ def _usage_pct(part: int, total: int) -> float:
     if total <= 0:
         return 0.0
     return round(1000.0 * part / total) / 10.0
+
+
+def _empty_metrics_rollup() -> dict[str, Any]:
+    return {
+        "jobs_with_metrics": 0,
+        "sum_input_bytes": 0,
+        "avg_input_bytes": 0.0,
+        "sum_media_duration_sec": 0.0,
+        "avg_media_duration_sec": 0.0,
+        "sum_audio_extract_sec": 0.0,
+        "avg_audio_extract_sec": 0.0,
+        "sum_whisper_sec": 0.0,
+        "avg_whisper_sec": 0.0,
+        "sum_transcript_chars": 0,
+        "avg_transcript_chars": 0.0,
+        "sum_extract_llm_sec": 0.0,
+        "sum_merge_llm_sec": 0.0,
+        "sum_llm_sec": 0.0,
+        "sum_llm_chunks": 0,
+    }
 
 
 def admin_usage_summary(days: int) -> dict[str, Any]:
@@ -815,6 +991,7 @@ def admin_usage_summary(days: int) -> dict[str, Any]:
             "openai_models_for_llm_jobs": [],
             "whisper_presets_for_media": [],
             "media_kind_breakdown": [],
+            "metrics_rollup": _empty_metrics_rollup(),
         }
     init_registry_db()
     cutoff = datetime.now() - timedelta(days=days)
@@ -862,7 +1039,7 @@ def admin_usage_summary(days: int) -> dict[str, Any]:
     wtotal = len(whisper_rows)
     wp_counts: dict[str, int] = {}
     for r in whisper_rows:
-        w = (r[3] or "balanced").strip() or "balanced"
+        w = (r[3] or "accurate").strip() or "accurate"
         wp_counts[w] = wp_counts.get(w, 0) + 1
     wp_list = sorted(wp_counts.items(), key=lambda x: (-x[1], x[0]))
     whisper_presets = [
@@ -876,6 +1053,54 @@ def admin_usage_summary(days: int) -> dict[str, Any]:
     mk_list = sorted(mk_counts.items(), key=lambda x: (-x[1], x[0]))
     media_breakdown = [{"kind": k, "count": c, "pct": _usage_pct(c, total)} for k, c in mk_list]
 
+    metrics_rollup = _empty_metrics_rollup()
+    try:
+        with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  COUNT(*),
+                  COALESCE(SUM(input_bytes), 0),
+                  COALESCE(AVG(input_bytes), 0),
+                  COALESCE(SUM(media_duration_sec), 0),
+                  COALESCE(AVG(media_duration_sec), 0),
+                  COALESCE(SUM(audio_extract_wall_sec), 0),
+                  COALESCE(AVG(audio_extract_wall_sec), 0),
+                  COALESCE(SUM(whisper_wall_sec), 0),
+                  COALESCE(AVG(whisper_wall_sec), 0),
+                  COALESCE(SUM(transcript_chars), 0),
+                  COALESCE(AVG(transcript_chars), 0),
+                  COALESCE(SUM(extract_llm_sec), 0),
+                  COALESCE(SUM(merge_llm_sec), 0),
+                  COALESCE(SUM(llm_chunks), 0)
+                FROM usage_job_log
+                WHERE created_at >= ? AND transcript_chars IS NOT NULL
+                """,
+                (cutoff_s,),
+            ).fetchone()
+        if row and int(row[0] or 0) > 0:
+            n_m = int(row[0])
+            sum_ex = float(row[11] or 0) + float(row[12] or 0)
+            metrics_rollup = {
+                "jobs_with_metrics": n_m,
+                "sum_input_bytes": int(row[1] or 0),
+                "avg_input_bytes": round(float(row[2] or 0), 2),
+                "sum_media_duration_sec": round(float(row[3] or 0), 3),
+                "avg_media_duration_sec": round(float(row[4] or 0), 3),
+                "sum_audio_extract_sec": round(float(row[5] or 0), 3),
+                "avg_audio_extract_sec": round(float(row[6] or 0), 3),
+                "sum_whisper_sec": round(float(row[7] or 0), 3),
+                "avg_whisper_sec": round(float(row[8] or 0), 3),
+                "sum_transcript_chars": int(row[9] or 0),
+                "avg_transcript_chars": round(float(row[10] or 0), 1),
+                "sum_extract_llm_sec": round(float(row[11] or 0), 3),
+                "sum_merge_llm_sec": round(float(row[12] or 0), 3),
+                "sum_llm_sec": round(sum_ex, 3),
+                "sum_llm_chunks": int(row[13] or 0),
+            }
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        pass
+
     return {
         "period_days": days,
         "total_submissions": total,
@@ -887,6 +1112,7 @@ def admin_usage_summary(days: int) -> dict[str, Any]:
         "openai_models_for_llm_jobs": openai_models_for_llm,
         "whisper_presets_for_media": whisper_presets,
         "media_kind_breakdown": media_breakdown,
+        "metrics_rollup": metrics_rollup,
     }
 
 
@@ -911,7 +1137,9 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
         cur = conn.execute(
             """
             SELECT id, created_at, task_id, user_email, transcript_only, llm_provider, model_name,
-                   whisper_preset, media_kind
+                   whisper_preset, media_kind,
+                   input_bytes, media_duration_sec, audio_extract_wall_sec, whisper_wall_sec,
+                   transcript_chars, extract_llm_sec, merge_llm_sec, llm_chunks
             FROM usage_job_log
             WHERE created_at >= ?
             ORDER BY created_at DESC, id DESC
@@ -932,6 +1160,14 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
                     "model_name": row["model_name"] or "",
                     "whisper_preset": row["whisper_preset"] or "",
                     "media_kind": row["media_kind"] or "",
+                    "input_bytes": row["input_bytes"],
+                    "media_duration_sec": row["media_duration_sec"],
+                    "audio_extract_wall_sec": row["audio_extract_wall_sec"],
+                    "whisper_wall_sec": row["whisper_wall_sec"],
+                    "transcript_chars": row["transcript_chars"],
+                    "extract_llm_sec": row["extract_llm_sec"],
+                    "merge_llm_sec": row["merge_llm_sec"],
+                    "llm_chunks": row["llm_chunks"],
                 }
             )
     return items, total
@@ -964,6 +1200,30 @@ def usage_admin_notes_list(limit: int = 80) -> list[dict[str, Any]]:
         ]
 
 
+def usage_admin_note_get(note_id: int) -> Optional[dict[str, Any]]:
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return None
+    init_registry_db()
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        r = conn.execute(
+            """
+            SELECT id, created_at, author_email, body
+            FROM usage_admin_notes
+            WHERE id = ?
+            """,
+            (int(note_id),),
+        ).fetchone()
+        if r is None:
+            return None
+        return {
+            "id": int(r["id"]),
+            "created_at": str(r["created_at"]) if r["created_at"] is not None else "",
+            "author_email": r["author_email"] or "",
+            "body": r["body"] or "",
+        }
+
+
 def usage_admin_note_add(author_email: str, body: str) -> Optional[int]:
     text = (body or "").strip()
     if not text:
@@ -987,3 +1247,138 @@ def usage_admin_note_delete(note_id: int) -> bool:
     with sqlite3.connect(REGISTRY_DB_PATH) as conn:
         cur = conn.execute("DELETE FROM usage_admin_notes WHERE id = ?", (int(note_id),))
         return cur.rowcount > 0
+
+
+def _normalize_suggestion_status(value: str) -> str:
+    v = (value or "").strip().lower()
+    if v not in ("new", "in_progress", "done"):
+        return "new"
+    return v
+
+
+def _suggestion_box_row_to_dict(r: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(r["id"]),
+        "created_at": str(r["created_at"]) if r["created_at"] is not None else "",
+        "updated_at": str(r["updated_at"]) if r["updated_at"] is not None else "",
+        "author_email": r["author_email"] or "",
+        "subject": r["subject"] or "",
+        "body": r["body"] or "",
+        "page_url": r["page_url"] or "",
+        "client_version": r["client_version"] or "",
+        "status": _normalize_suggestion_status(r["status"] or "new"),
+        "admin_note": r["admin_note"] or "",
+    }
+
+
+def suggestion_box_create(
+    author_email: str,
+    subject: str,
+    body: str,
+    page_url: str = "",
+    client_version: str = "",
+) -> Optional[int]:
+    """目安箱を 1 件保存（認証・registry 有効時）。"""
+    text = (body or "").strip()
+    if not text or not _auth_secret_configured():
+        return None
+    init_registry_db()
+    auth = registry_login_normalize(author_email) if (author_email or "").strip() else ""
+    subj = (subject or "").strip()[:200]
+    page = (page_url or "").strip()[:2000]
+    ver = (client_version or "").strip()[:64]
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO suggestion_box_entries
+            (author_email, subject, body, page_url, client_version, status)
+            VALUES (?, ?, ?, ?, ?, 'new')
+            """,
+            (auth, subj, text[:8000], page, ver),
+        )
+        return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+
+def suggestion_box_admin_list(
+    *,
+    status: str = "",
+    limit: int = 80,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return [], 0
+    init_registry_db()
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    st = (status or "").strip().lower()
+    where = ""
+    params_count: list[Any] = []
+    params_list: list[Any] = []
+    if st in ("new", "in_progress", "done"):
+        where = "WHERE status = ?"
+        params_count.append(st)
+        params_list.append(st)
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM suggestion_box_entries {where}",
+                tuple(params_count),
+            ).fetchone()[0]
+        )
+        cur = conn.execute(
+            f"""
+            SELECT id, created_at, updated_at, author_email, subject, body, page_url, client_version, status, admin_note
+            FROM suggestion_box_entries
+            {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params_list + [limit, offset]),
+        )
+        return [_suggestion_box_row_to_dict(r) for r in cur.fetchall()], total
+
+
+def suggestion_box_admin_update(
+    ticket_id: int,
+    *,
+    status: Optional[str] = None,
+    admin_note: Optional[str] = None,
+) -> bool:
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return False
+    fields: list[tuple[str, Any]] = []
+    if status is not None:
+        fields.append(("status", _normalize_suggestion_status(status)))
+    if admin_note is not None:
+        fields.append(("admin_note", (admin_note or "")[:8000]))
+    if not fields:
+        return False
+    sets = ", ".join([f"{k} = ?" for k, _ in fields] + ["updated_at = CURRENT_TIMESTAMP"])
+    vals = [v for _, v in fields] + [int(ticket_id)]
+    init_registry_db()
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        cur = conn.execute(
+            f"UPDATE suggestion_box_entries SET {sets} WHERE id = ?",
+            vals,
+        )
+        return cur.rowcount > 0
+
+
+def suggestion_box_admin_get(ticket_id: int) -> Optional[dict[str, Any]]:
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return None
+    init_registry_db()
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        r = conn.execute(
+            """
+            SELECT id, created_at, updated_at, author_email, subject, body, page_url, client_version, status, admin_note
+            FROM suggestion_box_entries
+            WHERE id = ?
+            """,
+            (int(ticket_id),),
+        ).fetchone()
+        if r is None:
+            return None
+        return _suggestion_box_row_to_dict(r)

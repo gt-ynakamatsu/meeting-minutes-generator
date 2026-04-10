@@ -2,7 +2,7 @@ import json
 
 import streamlit as st
 
-from backend.storage import save_uploaded_prompts as save_uploaded_prompts_bytes
+from backend.storage import merge_task_prompt_paths
 
 
 def render_minutes(text: str) -> None:
@@ -40,10 +40,12 @@ def render_minutes(text: str) -> None:
             st.info("詳細な議事録データが作成されていません。")
 
 
-def save_uploaded_prompts(task_id, extract_file, merge_file):
+def save_uploaded_prompts(task_id, extract_file, merge_file, teams_file=None, notes_file=None):
     ex = extract_file.getvalue() if extract_file is not None else None
     mg = merge_file.getvalue() if merge_file is not None else None
-    return save_uploaded_prompts_bytes(task_id, ex, mg)
+    tb = teams_file.getvalue() if teams_file is not None else None
+    nb = notes_file.getvalue() if notes_file is not None else None
+    return merge_task_prompt_paths(task_id, ex, mg, tb, nb)
 
 
 def render_error_hints(status: str) -> None:

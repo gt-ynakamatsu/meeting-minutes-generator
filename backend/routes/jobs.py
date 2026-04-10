@@ -14,10 +14,19 @@ from backend import smtp_notify
 from backend.auth_settings import auth_enabled
 from backend.deps import ApiUser
 from backend.schemas import TaskSubmitMetadata
-from backend.storage import save_uploaded_prompts
+from backend.storage import merge_task_prompt_paths
 from celery_app import celery_app
 
 router = APIRouter(tags=["jobs"])
+
+_SUPPLEMENTARY_EXT = frozenset({".txt", ".md", ".vtt"})
+
+
+def _supplementary_upload_ok(name: Optional[str]) -> bool:
+    if not (name or "").strip():
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    return ext in _SUPPLEMENTARY_EXT
 
 
 @router.post("/api/tasks")
@@ -27,6 +36,8 @@ async def create_task(
     file: UploadFile = File(...),
     prompt_extract: Optional[UploadFile] = File(None),
     prompt_merge: Optional[UploadFile] = File(None),
+    supplementary_teams: Optional[UploadFile] = File(None),
+    supplementary_notes: Optional[UploadFile] = File(None),
 ):
     try:
         meta = TaskSubmitMetadata.model_validate_json(metadata)
@@ -93,6 +104,17 @@ async def create_task(
     if not file.filename:
         raise HTTPException(status_code=400, detail="ファイル名がありません")
 
+    if supplementary_teams and supplementary_teams.filename and not _supplementary_upload_ok(supplementary_teams.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="参考資料（Teams 等）は .txt / .md / .vtt のみ対応です",
+        )
+    if supplementary_notes and supplementary_notes.filename and not _supplementary_upload_ok(supplementary_notes.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="参考資料（メモ）は .txt / .md / .vtt のみ対応です",
+        )
+
     task_id = str(uuid.uuid4())
     os.makedirs("downloads", exist_ok=True)
     safe_name = os.path.basename(file.filename)
@@ -130,8 +152,9 @@ async def create_task(
             bool(meta.transcript_only),
             meta.llm_provider,
             model_for_log,
-            whisper_preset=(meta.whisper_preset or "balanced"),
+            whisper_preset=(meta.whisper_preset or "accurate"),
             original_filename=safe_name,
+            input_bytes=len(body),
         )
 
     whisper_bundle = {"whisper_preset": meta.whisper_preset}
@@ -159,7 +182,9 @@ async def create_task(
 
     pe_bytes = await prompt_extract.read() if prompt_extract and prompt_extract.filename else None
     pm_bytes = await prompt_merge.read() if prompt_merge and prompt_merge.filename else None
-    prompt_paths = save_uploaded_prompts(task_id, pe_bytes, pm_bytes)
+    st_bytes = await supplementary_teams.read() if supplementary_teams and supplementary_teams.filename else None
+    sn_bytes = await supplementary_notes.read() if supplementary_notes and supplementary_notes.filename else None
+    prompt_paths = merge_task_prompt_paths(task_id, pe_bytes, pm_bytes, st_bytes, sn_bytes)
 
     celery_app.send_task(
         "tasks.process_video_task",

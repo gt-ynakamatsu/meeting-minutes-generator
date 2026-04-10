@@ -168,7 +168,7 @@ with st.sidebar:
     _whisper_choice = st.selectbox(
         "音声認識の品質（Whisper）",
         list(_whisper_labels.keys()),
-        index=1,
+        index=2,
         help=(
             "動画・音声を Whisper で文字起こしするときの探索の強さです。"
             "高精度にすると誤変換が減りやすい一方、GPU／CPU の負荷と待ち時間は大きくなります。"
@@ -193,6 +193,18 @@ with st.sidebar:
         "統合・整形プロンプト（.txt）",
         type=["txt"],
         key="fmt_merge",
+    )
+    st.caption("議事録の補正・固有名の照合に使う参考テキスト（任意）")
+    sup_teams = st.file_uploader(
+        "参考: Teams 等のトランスクリプト",
+        type=["txt", "md", "vtt"],
+        key="sup_teams",
+        help="タイムコード付き .vtt は簡易的に本文だけ取り出します。",
+    )
+    sup_notes = st.file_uploader(
+        "参考: 担当メモ・.md",
+        type=["txt", "md", "vtt"],
+        key="sup_notes",
     )
 
     st.divider()
@@ -277,6 +289,7 @@ with st.sidebar:
                     model_name.strip(),
                     whisper_preset=whisper_preset,
                     original_filename=uploaded_file.name,
+                    input_bytes=os.path.getsize(path),
                 )
 
             ntype = {"ブラウザ": "browser", "Webhook": "webhook", "なし": "none"}.get(
@@ -291,7 +304,7 @@ with st.sidebar:
                 "transcript_only": transcript_only,
                 "whisper_preset": whisper_preset,
             }
-            prompt_paths = save_uploaded_prompts(task_id, fmt_extract, fmt_merge)
+            prompt_paths = save_uploaded_prompts(task_id, fmt_extract, fmt_merge, sup_teams, sup_notes)
             process_video_task.delay(
                 task_id,
                 email,
@@ -343,13 +356,21 @@ if st.session_state.pending_tasks:
     st.session_state.pending_tasks = remaining_tasks
 
 st.subheader("処理キュー（待機・実行中）")
-queue = db.get_active_queue_records()
+if auth_enabled():
+    st.caption("認証あり: 全登録ユーザーの待機・実行中を表示します（共有ワーカーの順番の目安）。")
+    queue = db.get_active_queue_records_global(viewer="", days=7, limit=80)
+else:
+    queue = db.get_active_queue_records()
 if not queue:
     st.caption("現在、待機・実行中のジョブはありません。")
 else:
     for q in queue:
         meta = q["topic"] or "（議題なし）"
-        st.write(f"- **{meta}** · `{q['filename']}` · `{q['status']}` · {q['created_at']}")
+        if auth_enabled() and isinstance(q, dict):
+            owner_disp = q.get("job_owner") or q.get("email") or "レガシー/共有"
+            st.write(f"- **{meta}** · `{q['filename']}` · `{q['status']}` · {q['created_at']} · *投入者: {owner_disp}*")
+        else:
+            st.write(f"- **{meta}** · `{q['filename']}` · `{q['status']}` · {q['created_at']}")
 
 st.markdown("---")
 st.subheader("議事録アーカイブ")

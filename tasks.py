@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+from typing import Optional
 
 # Redis 起動待ち（ワーカーが tasks を import するときのみ実行）
 time.sleep(10)
@@ -27,6 +28,10 @@ import shutil
 # Ollama Configuration（Compose の worker では OLLAMA_BASE_URL を注入。ホストで Celery する場合は 127.0.0.1）
 
 logger = logging.getLogger(__name__)
+
+_MSG_TRANSCRIPT_ONLY_DONE = "✅ **書き起こし完了**（議事録なしモード）\nファイル: {filename}\n[アーカイブで書き起こしを確認]"
+_MSG_MINUTES_DONE = "✅ **議事録作成完了**\nファイル: {filename}\n[アーカイブを確認]"
+_MSG_TASK_FAILED = "❌ **議事録処理に失敗しました（ジョブは破棄されました）**\nファイル: {filename}\n\n{detail}"
 
 
 def _maybe_send_completion_email(to_addr: str, filename: str, task_id: str) -> None:
@@ -53,10 +58,10 @@ def _notify_task_failure(
     if (notification_type or "") in ("", "browser", "none"):
         return
     text_detail = (detail or "").strip()[:1200]
-    final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
+    final_webhook_url = _final_webhook_url(webhook_url)
     if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
         try:
-            text = f"❌ **議事録処理に失敗しました（ジョブは破棄されました）**\nファイル: {filename}\n\n{text_detail}"
+            text = _MSG_TASK_FAILED.format(filename=filename, detail=text_detail)
             requests.post(
                 final_webhook_url,
                 json={"text": text, "email": email, "filename": filename},
@@ -70,6 +75,40 @@ def _notify_task_failure(
             logger.warning("失敗メールをスキップ（backend.smtp_notify を読み込めません）: %s", e)
             return
         send_task_failure_email(email, filename, task_id, text_detail)
+
+
+def _final_webhook_url(webhook_url):
+    return webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
+
+
+def _notify_task_completion(
+    notification_type: str,
+    email: str,
+    filename: str,
+    webhook_url,
+    text: str,
+    task_id: str,
+) -> None:
+    if (notification_type or "") in ("", "browser", "none"):
+        return
+    final_webhook_url = _final_webhook_url(webhook_url)
+    if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
+        try:
+            requests.post(
+                final_webhook_url,
+                json={"text": text, "email": email, "filename": filename},
+            )
+        except Exception:
+            pass
+        return
+    if notification_type == "email" and email:
+        _maybe_send_completion_email(email, filename, task_id)
+
+
+def _completion_message(kind: str, filename: str) -> str:
+    if kind == "transcript_only":
+        return _MSG_TRANSCRIPT_ONLY_DONE.format(filename=filename)
+    return _MSG_MINUTES_DONE.format(filename=filename)
 
 
 OLLAMA_URL = ollama_generate_url()
@@ -117,7 +156,7 @@ def _whisper_runtime():
 
 def _whisper_transcribe_options(preset: str) -> dict:
     """UI のプリセット → faster_whisper.WhisperModel.transcribe に渡す追加引数（balanced はライブラリ既定）。"""
-    p = (preset or "").strip().lower() or "balanced"
+    p = (preset or "").strip().lower() or "accurate"
     if p == "fast":
         return {
             "beam_size": 1,
@@ -486,16 +525,65 @@ def _try_ollama_unload_for_config(llm_config, ollama_model_name: str) -> None:
     try_ollama_unload_model(model)
 
 
-def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None, llm_config=None, ollama_model=None):
-    _cleanup_user_prompts(task_id)
-    for p in (file_path, audio_path):
+def _remove_files(*paths) -> None:
+    for p in paths:
         try:
             if p and os.path.exists(p):
                 os.remove(p)
-        except OSError:
+        except Exception:
             pass
+
+
+def _safe_update_usage_metrics(task_id: str, **kwargs) -> None:
+    try:
+        db.update_usage_job_metrics(task_id, **kwargs)
+    except Exception:
+        pass
+
+
+def _cleanup_after_cancel(task_id, owner, file_path, audio_path=None, llm_config=None, ollama_model=None):
+    _cleanup_user_prompts(task_id)
+    _remove_files(file_path, audio_path)
     _flush_whisper_before_ollama(None)
     _try_ollama_unload_for_config(llm_config, ollama_model or "")
+
+
+def _cleanup_if_cancelled(task_id, owner, file_path, audio_path=None, llm_config=None, ollama_model=None) -> bool:
+    """キャンセル済みなら後片付けして True を返す。"""
+    if not _record_cancelled(task_id, owner or ""):
+        return False
+    _cleanup_after_cancel(task_id, owner, file_path, audio_path, llm_config, ollama_model)
+    return True
+
+
+def _normalize_task_runtime_config(llm_config):
+    """API から渡された llm_config を実行時設定へ正規化する。"""
+    lc = dict(llm_config) if isinstance(llm_config, dict) else {}
+    notification_type = lc.pop("notification_type", "browser")
+    transcript_only = bool(lc.pop("transcript_only", False) or lc.pop("audio_extract_only", False))
+    wp_raw = str(lc.pop("whisper_preset", "") or "accurate").strip().lower()
+    whisper_preset = wp_raw if wp_raw in ("fast", "balanced", "accurate") else "accurate"
+    normalized_llm = lc if lc else None
+    return notification_type, transcript_only, whisper_preset, normalized_llm
+
+
+def _load_prompt_templates(prompt_paths):
+    extract_path = prompt_paths.get("extract") if prompt_paths else None
+    merge_path = prompt_paths.get("merge") if prompt_paths else None
+    prompt_extract = load_prompt(extract_path) if extract_path else load_prompt(DEFAULT_PROMPT_EXTRACT)
+    prompt_merge = load_prompt(merge_path) if merge_path else load_prompt(DEFAULT_PROMPT_MERGE)
+    return prompt_extract, prompt_merge
+
+
+def _build_prompt_shells(record, prompt_extract: str, prompt_merge: str):
+    preset_ex, preset_mg = preset_hints_for_record(record)
+    extract_shell = _assemble_prompt_with_context(
+        prompt_extract, record, preset_ex, "# 会議タイプに関する追加指示"
+    )
+    merge_shell = _assemble_prompt_with_context(
+        prompt_merge, record, preset_mg, "# 統合・整形の追加指示"
+    )
+    return extract_shell, merge_shell, preset_ex
 
 
 def _assemble_prompt_with_context(base_template, record, preset_hint, hint_heading):
@@ -511,6 +599,86 @@ def _assemble_prompt_with_context(base_template, record, preset_hint, hint_headi
     return base_template
 
 
+SUPPLEMENTARY_MAX_CHARS = int(os.environ.get("MM_SUPPLEMENTARY_MAX_CHARS", "120000"))
+
+
+def _strip_webvtt_to_plain(text: str) -> str:
+    """WebVTT から発言テキストだけを粗く取り出す（タイムコード・キュー番号を除去）。"""
+    out = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        up = s.upper()
+        if up == "WEBVTT" or up.startswith("NOTE"):
+            continue
+        if "-->" in s:
+            continue
+        if re.match(r"^\d+$", s):
+            continue
+        out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def _build_supplementary_reference_text(teams_path, notes_path) -> str:
+    parts = []
+    if teams_path and os.path.isfile(teams_path):
+        with open(teams_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+        head = raw.lstrip()[:32].upper()
+        if str(teams_path).lower().endswith(".vtt") or head.startswith("WEBVTT"):
+            raw = _strip_webvtt_to_plain(raw)
+        raw = raw.strip()
+        if raw:
+            parts.append("## Teams 等のトランスクリプト（参考）\n" + raw)
+    if notes_path and os.path.isfile(notes_path):
+        with open(notes_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read().strip()
+        if raw:
+            parts.append("## 担当メモ・補足（参考）\n" + raw)
+    combined = "\n\n".join(parts)
+    if len(combined) > SUPPLEMENTARY_MAX_CHARS:
+        combined = combined[:SUPPLEMENTARY_MAX_CHARS] + "\n\n…（以下省略: MM_SUPPLEMENTARY_MAX_CHARS 上限）"
+    return combined
+
+
+def _inject_supplementary_extract(shell: str, sup_fill: str, sup_body: str) -> str:
+    if "{SUPPLEMENTARY_REFERENCE}" in shell:
+        return shell.replace("{SUPPLEMENTARY_REFERENCE}", sup_fill)
+    if not (sup_body or "").strip():
+        return shell
+    inject = (
+        "# --- 参考資料（Teams・メモ。会話ログを主たる根拠とし、固有名の照合に利用） ---\n"
+        f"{sup_fill}\n\n"
+    )
+    if "{CHUNK_TEXT}" in shell:
+        return shell.replace("{CHUNK_TEXT}", inject + "{CHUNK_TEXT}", 1)
+    return inject + shell
+
+
+def _media_duration_sec_from_segments(segments) -> float:
+    if not segments:
+        return 0.0
+    try:
+        return max(float(s.get("end", 0.0) or 0.0) for s in segments if isinstance(s, dict))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _inject_supplementary_merge(shell: str, sup_fill: str, sup_body: str) -> str:
+    if "{SUPPLEMENTARY_REFERENCE}" in shell:
+        return shell.replace("{SUPPLEMENTARY_REFERENCE}", sup_fill)
+    if not (sup_body or "").strip():
+        return shell
+    suffix = (
+        "\n\n# 参考資料（Teams・メモ）\n"
+        f"{sup_fill}\n"
+    )
+    if "{EXTRACTED_JSON}" in shell:
+        return shell.replace("{EXTRACTED_JSON}", "{EXTRACTED_JSON}" + suffix, 1)
+    return shell + suffix
+
+
 def _finish_transcript_only_task(
     task_id,
     owner_username,
@@ -522,8 +690,23 @@ def _finish_transcript_only_task(
     notification_type,
     llm_config,
     ollama_model,
+    usage_metrics: Optional[dict] = None,
 ):
     """書き起こしのみモード: transcript 保存済みのあとで完了し、投入ファイルを掃除する。"""
+    um = dict(usage_metrics or {})
+    if os.path.isfile(file_path):
+        um.setdefault("input_bytes", os.path.getsize(file_path))
+    _safe_update_usage_metrics(
+        task_id,
+        input_bytes=um.get("input_bytes"),
+        media_duration_sec=um.get("media_duration_sec"),
+        audio_extract_wall_sec=um.get("audio_extract_wall_sec"),
+        whisper_wall_sec=um.get("whisper_wall_sec"),
+        transcript_chars=um.get("transcript_chars"),
+        extract_llm_sec=um.get("extract_llm_sec"),
+        merge_llm_sec=um.get("merge_llm_sec"),
+        llm_chunks=um.get("llm_chunks"),
+    )
     summary_md = (
         "## 書き起こしのみ完了\n\n"
         f"- 元ファイル: {filename}\n"
@@ -531,28 +714,12 @@ def _finish_transcript_only_task(
         "- アーカイブの「書き起こし」タブ、または書き起こしのエクスポートでテキストを取得できます。\n"
     )
     db.update_record(task_id, owner_username or "", status="completed", summary=summary_md)
-    try:
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-    except OSError:
-        pass
+    _remove_files(audio_path, file_path)
     _cleanup_user_prompts(task_id)
     _flush_whisper_before_ollama(None)
     _try_ollama_unload_for_config(llm_config, ollama_model)
-    final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
-    if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
-        msg = f"✅ **書き起こし完了**（議事録なしモード）\nファイル: {filename}\n[アーカイブで書き起こしを確認]"
-        try:
-            requests.post(
-                final_webhook_url,
-                json={"text": msg, "email": email, "filename": filename},
-            )
-        except Exception:
-            pass
-    elif notification_type == "email" and email:
-        _maybe_send_completion_email(email, filename, task_id)
+    msg = _completion_message("transcript_only", filename)
+    _notify_task_completion(notification_type, email, filename, webhook_url, msg, task_id)
 
 
 @celery_app.task
@@ -567,12 +734,9 @@ def process_video_task(
     owner_username="",
 ):
     # notification_type / transcript_only は API が llm_config に同梱（古いワーカー互換のため kwargs 不使用）
-    _lc = dict(llm_config) if isinstance(llm_config, dict) else {}
-    notification_type = _lc.pop("notification_type", "browser")
-    transcript_only = bool(_lc.pop("transcript_only", False) or _lc.pop("audio_extract_only", False))
-    _wp = str(_lc.pop("whisper_preset", "") or "balanced").strip().lower()
-    whisper_preset = _wp if _wp in ("fast", "balanced", "accurate") else "balanced"
-    llm_config = _lc if _lc else None
+    notification_type, transcript_only, whisper_preset, llm_config = _normalize_task_runtime_config(
+        llm_config
+    )
 
     db.purge_expired_minutes(owner_username or "")
     record = db.get_record(task_id, owner_username or "")
@@ -582,52 +746,38 @@ def process_video_task(
     ollama_model = (llm_config or {}).get("ollama_model") or DEFAULT_OLLAMA_MODEL
 
     if _record_cancelled(task_id, owner_username or ""):
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except OSError:
-            pass
+        _remove_files(file_path)
         _cleanup_user_prompts(task_id)
         _flush_whisper_before_ollama(None)
         return
 
     audio_path = os.path.join("downloads", f"{uuid.uuid4()}.mp3")
 
-    extract_path = prompt_paths.get("extract") if prompt_paths else None
-    merge_path = prompt_paths.get("merge") if prompt_paths else None
-    prompt_extract = load_prompt(extract_path) if extract_path else load_prompt(DEFAULT_PROMPT_EXTRACT)
-    prompt_merge = load_prompt(merge_path) if merge_path else load_prompt(DEFAULT_PROMPT_MERGE)
-
-    preset_ex, preset_mg = preset_hints_for_record(record)
-    extract_shell = _assemble_prompt_with_context(
-        prompt_extract, record, preset_ex, "# 会議タイプに関する追加指示"
-    )
-    merge_shell = _assemble_prompt_with_context(
-        prompt_merge, record, preset_mg, "# 統合・整形の追加指示"
-    )
+    prompt_extract, prompt_merge = _load_prompt_templates(prompt_paths)
+    extract_shell, merge_shell, preset_ex = _build_prompt_shells(record, prompt_extract, prompt_merge)
 
     ext = os.path.splitext(file_path)[1].lower()
     is_transcript = ext in (".txt", ".srt")
     is_audio_only = ext in (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".m4b")
     # Whisper 使用時は実際の device（cuda 等）を記録し、fail / 例外で同じデバイスをフラッシュする
     whisper_cuda_device = None
+    # 管理者向け利用メトリクス（壁時計・文字数。本文は保存しない）
+    media_duration_sec = 0.0
+    audio_extract_sec = 0.0
+    whisper_sec = 0.0
+    extract_llm_sec = 0.0
+    merge_llm_sec = 0.0
+    raw_transcript = ""
 
     def fail(msg, exc_info=False):
         _flush_whisper_before_ollama(whisper_cuda_device)
-        if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
+        if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
             return
         err_summary = f"【処理エラー】\n{msg}"
         db.update_record(task_id, owner_username or "", status="cancelled", summary=err_summary)
         _notify_task_failure(notification_type, email, filename, webhook_url, msg, task_id)
         _cleanup_user_prompts(task_id)
-        try:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
+        _remove_files(audio_path, file_path)
         _try_ollama_unload_for_config(llm_config, ollama_model)
 
     try:
@@ -646,6 +796,7 @@ def process_video_task(
             if not chunks_for_ai:
                 fail("チャンクを生成できませんでした")
                 return
+            media_duration_sec = _media_duration_sec_from_segments(segments)
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
             if transcript_only:
                 _finish_transcript_only_task(
@@ -659,6 +810,15 @@ def process_video_task(
                     notification_type,
                     llm_config,
                     ollama_model,
+                    usage_metrics={
+                        "media_duration_sec": media_duration_sec,
+                        "audio_extract_wall_sec": 0.0,
+                        "whisper_wall_sec": 0.0,
+                        "transcript_chars": len(raw_transcript),
+                        "extract_llm_sec": 0.0,
+                        "merge_llm_sec": 0.0,
+                        "llm_chunks": 0,
+                    },
                 )
                 return
         else:
@@ -666,10 +826,12 @@ def process_video_task(
                 _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
                 return
             db.update_record(task_id, owner_username or "", status="processing:extracting_audio")
+            ae0 = time.perf_counter()
             if is_audio_only:
                 audio_clip = None
                 try:
                     audio_clip = AudioFileClip(file_path)
+                    media_duration_sec = float(getattr(audio_clip, "duration", None) or 0.0)
                     audio_clip.write_audiofile(audio_path, logger=None)
                 finally:
                     if audio_clip is not None:
@@ -681,10 +843,12 @@ def process_video_task(
                     if video.audio is None:
                         fail("動画に音声トラックがありません")
                         return
+                    media_duration_sec = float(getattr(video, "duration", None) or 0.0)
                     video.audio.write_audiofile(audio_path, logger=None)
                 finally:
                     if video is not None:
                         video.close()
+            audio_extract_sec = time.perf_counter() - ae0
 
             _trim_process_memory()
 
@@ -705,16 +869,13 @@ def process_video_task(
             )
             model = None
             segments = None
+            tw0 = time.perf_counter()
             try:
                 model = WhisperModel(wm, device=wd, compute_type=wct)
                 raw_segments, _ = model.transcribe(audio_path, **tw_kw)
                 segments = normalize_to_segments(list(raw_segments))
             finally:
-                try:
-                    if model is not None:
-                        del model
-                except Exception:
-                    pass
+                whisper_sec = time.perf_counter() - tw0
                 model = None
                 _release_whisper_gpu_resources(wd)
 
@@ -722,6 +883,9 @@ def process_video_task(
             _flush_whisper_before_ollama(wd)
 
             chunks_for_ai, raw_transcript = build_chunks_from_segments(segments)
+            md_seg = _media_duration_sec_from_segments(segments)
+            if md_seg > 0:
+                media_duration_sec = md_seg
             db.update_record(task_id, owner_username or "", transcript=raw_transcript)
             if not chunks_for_ai:
                 fail("文字起こし結果が空でした")
@@ -738,6 +902,15 @@ def process_video_task(
                     notification_type,
                     llm_config,
                     ollama_model,
+                    usage_metrics={
+                        "media_duration_sec": media_duration_sec,
+                        "audio_extract_wall_sec": audio_extract_sec,
+                        "whisper_wall_sec": whisper_sec,
+                        "transcript_chars": len(raw_transcript),
+                        "extract_llm_sec": 0.0,
+                        "merge_llm_sec": 0.0,
+                        "llm_chunks": 0,
+                    },
                 )
                 return
 
@@ -746,16 +919,27 @@ def process_video_task(
                 "{CHUNK_TEXT}", record, preset_ex, "# 会議タイプに関する追加指示"
             )
 
+        teams_path = (prompt_paths or {}).get("supplementary_teams")
+        notes_path = (prompt_paths or {}).get("supplementary_notes")
+        sup_body = _build_supplementary_reference_text(teams_path, notes_path)
+        sup_fill = (
+            sup_body
+            if sup_body.strip()
+            else "(参考資料はありません。会話ログのみを根拠にしてください。)"
+        )
+        extract_shell = _inject_supplementary_extract(extract_shell, sup_fill, sup_body)
+        merge_shell = _inject_supplementary_merge(merge_shell, sup_fill, sup_body)
+
         extracted_results = []
         extraction_errors = []
         total_chunks = len(chunks_for_ai)
 
         for i, chunk_text in enumerate(chunks_for_ai):
-            if _record_cancelled(task_id, owner_username or ""):
-                _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
+            if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
                 return
             db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
             prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
+            te0 = time.perf_counter()
             try:
                 response_text = call_llm(
                     prompt,
@@ -770,6 +954,8 @@ def process_video_task(
             except Exception as e:
                 print(f"Extraction failed for chunk {i}: {e}")
                 extraction_errors.append(f"Chunk {i}: {str(e)}")
+            finally:
+                extract_llm_sec += time.perf_counter() - te0
 
         if not extracted_results:
             detail = (
@@ -785,8 +971,7 @@ def process_video_task(
             fail(detail)
             return
 
-        if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
+        if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
             return
         db.update_record(task_id, owner_username or "", status="processing:merging")
 
@@ -799,8 +984,10 @@ def process_video_task(
 
         if not (prompt_merge or "").strip():
             final_summary = json_str
+            merge_llm_sec = 0.0
         else:
             prompt = merge_shell.replace("{EXTRACTED_JSON}", json_str)
+            tm0 = time.perf_counter()
             try:
                 final_summary = call_llm(
                     prompt,
@@ -812,6 +999,8 @@ def process_video_task(
             except Exception as e:
                 final_summary = f"Merge failed (Error: {e})\n\n{json_str}"
                 _try_ollama_unload_for_config(llm_config, ollama_model)
+            finally:
+                merge_llm_sec = time.perf_counter() - tm0
 
         if final_summary.startswith("```markdown"):
             final_summary = final_summary.replace("```markdown", "", 1)
@@ -824,28 +1013,25 @@ def process_video_task(
         final_summary = re.sub(timestamp_pattern, "", final_summary)
         final_summary = final_summary.strip()
 
+        input_b = os.path.getsize(file_path) if os.path.isfile(file_path) else None
+        _safe_update_usage_metrics(
+            task_id,
+            input_bytes=input_b,
+            media_duration_sec=media_duration_sec,
+            audio_extract_wall_sec=0.0 if is_transcript else audio_extract_sec,
+            whisper_wall_sec=whisper_sec,
+            transcript_chars=len(raw_transcript or ""),
+            extract_llm_sec=extract_llm_sec,
+            merge_llm_sec=merge_llm_sec,
+            llm_chunks=total_chunks,
+        )
+
         db.update_record(task_id, owner_username or "", status="completed", summary=final_summary)
 
-        final_webhook_url = webhook_url if webhook_url else os.getenv("WEBHOOK_URL")
-        if notification_type == "webhook" and email and final_webhook_url and final_webhook_url != "YOUR_WEBHOOK_URL_HERE":
-            msg = f"✅ **議事録作成完了**\nファイル: {filename}\n[アーカイブを確認]"
-            try:
-                requests.post(
-                    final_webhook_url,
-                    json={"text": msg, "email": email, "filename": filename},
-                )
-            except Exception:
-                pass
-        elif notification_type == "email" and email:
-            _maybe_send_completion_email(email, filename, task_id)
+        msg = _completion_message("minutes", filename)
+        _notify_task_completion(notification_type, email, filename, webhook_url, msg, task_id)
 
-        try:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
+        _remove_files(audio_path, file_path)
         _cleanup_user_prompts(task_id)
 
         # 次ジョブ開始時の GPU / Ollama VRAM 不足を防ぐ（同一ワーカーで連続処理する場合）
@@ -857,19 +1043,12 @@ def process_video_task(
 
         _flush_whisper_before_ollama(whisper_cuda_device)
         traceback.print_exc()
-        if _record_cancelled(task_id, owner_username or ""):
-            _cleanup_after_cancel(task_id, owner_username, file_path, audio_path, llm_config, ollama_model)
+        if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
             return
         err_text = str(e)
         err_summary = f"【処理エラー】\n{err_text}"
         db.update_record(task_id, owner_username or "", status="cancelled", summary=err_summary)
         _notify_task_failure(notification_type, email, filename, webhook_url, err_text, task_id)
         _cleanup_user_prompts(task_id)
-        try:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
+        _remove_files(audio_path, file_path)
         _try_ollama_unload_for_config(llm_config, ollama_model)

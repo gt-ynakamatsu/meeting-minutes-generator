@@ -3,12 +3,13 @@
 import logging
 import os
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 import database as db
+from backend.auth_settings import auth_enabled
 from backend.deps import ApiUser
 from backend.http_utils import content_disposition_attachment, sqlite_row_to_dict
 from backend.schemas import RecordsPageResponse, SummaryPatch
@@ -18,9 +19,14 @@ router = APIRouter(tags=["records"])
 logger = logging.getLogger(__name__)
 
 
-def _queue_row_for_api(row) -> dict:
+def _queue_row_for_api(
+    row: Any,
+    *,
+    job_owner: Optional[str] = None,
+    is_mine: Optional[bool] = None,
+) -> dict:
     """キュー一覧はポーリングで頻繁に取るため、巨大な transcript / summary を載せず ready フラグのみ。"""
-    d = sqlite_row_to_dict(row)
+    d = sqlite_row_to_dict(row) if not isinstance(row, dict) else dict(row)
     t = d.get("transcript")
     status = str(d.get("status") or "")
     has_text = bool(t is not None and str(t).strip() != "")
@@ -28,6 +34,14 @@ def _queue_row_for_api(row) -> dict:
     d["transcript_ready"] = has_text and status != "processing:transcribing"
     d.pop("transcript", None)
     d.pop("summary", None)
+    if job_owner is not None:
+        d["job_owner"] = job_owner
+    elif "job_owner" not in d:
+        d["job_owner"] = None
+    if is_mine is not None:
+        d["is_mine"] = bool(is_mine)
+    elif "is_mine" not in d:
+        d["is_mine"] = True
     return d
 
 
@@ -63,8 +77,12 @@ def list_records(
 
 @router.get("/api/queue")
 def queue_records(_auth: ApiUser):
-    rows = db.get_active_queue_records(_auth or "")
-    return [_queue_row_for_api(r) for r in rows]
+    viewer = (_auth or "").strip()
+    if auth_enabled():
+        merged = db.get_active_queue_records_global(viewer=viewer, days=7, limit=80)
+        return [_queue_row_for_api(r) for r in merged]
+    rows = db.get_active_queue_records(viewer if viewer else "", days=7, limit=80)
+    return [_queue_row_for_api(r, is_mine=True) for r in rows]
 
 
 @router.get("/api/records/{task_id}")

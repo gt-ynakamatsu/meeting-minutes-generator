@@ -27,7 +27,7 @@ class TaskSubmitMetadata(BaseModel):
     preset_id: str = "standard"
     context: MeetingContext = Field(default_factory=MeetingContext)
     # faster-whisper のビーム探索など。動画・音声の文字起こし時のみワーカーで解釈
-    whisper_preset: Literal["fast", "balanced", "accurate"] = "balanced"
+    whisper_preset: Literal["fast", "balanced", "accurate"] = "accurate"
     # True のとき書き起こしまで（.txt/.srt 読込 or Whisper）で完了し、議事録用 LLM は実行しない
     transcript_only: bool = False
     # 旧 API 名（誤解を招くが互換のため残す）。True なら transcript_only と同義
@@ -73,6 +73,13 @@ class AuthStatusResponse(BaseModel):
 class ErrorReportRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     detail: str = Field(default="", max_length=12000)
+    page_url: str = Field(default="", max_length=2000)
+    client_version: str = Field(default="", max_length=64)
+
+
+class SuggestionBoxCreateRequest(BaseModel):
+    subject: str = Field(default="", max_length=200)
+    body: str = Field(..., min_length=1, max_length=8000)
     page_url: str = Field(default="", max_length=2000)
     client_version: str = Field(default="", max_length=64)
 
@@ -161,6 +168,26 @@ class UsageMediaKindRow(BaseModel):
     pct: float
 
 
+class UsageMetricsRollup(BaseModel):
+    """完了ジョブでメトリクスが記録された件（transcript_chars あり）のみを対象とした集計。"""
+
+    jobs_with_metrics: int = 0
+    sum_input_bytes: int = 0
+    avg_input_bytes: float = 0.0
+    sum_media_duration_sec: float = 0.0
+    avg_media_duration_sec: float = 0.0
+    sum_audio_extract_sec: float = 0.0
+    avg_audio_extract_sec: float = 0.0
+    sum_whisper_sec: float = 0.0
+    avg_whisper_sec: float = 0.0
+    sum_transcript_chars: int = 0
+    avg_transcript_chars: float = 0.0
+    sum_extract_llm_sec: float = 0.0
+    sum_merge_llm_sec: float = 0.0
+    sum_llm_sec: float = 0.0
+    sum_llm_chunks: int = 0
+
+
 class AdminUsageSummaryResponse(BaseModel):
     period_days: int
     total_submissions: int
@@ -172,6 +199,7 @@ class AdminUsageSummaryResponse(BaseModel):
     openai_models_for_llm_jobs: list[UsageModelBreakdownRow]
     whisper_presets_for_media: list[UsagePresetBreakdownRow]
     media_kind_breakdown: list[UsageMediaKindRow]
+    metrics_rollup: UsageMetricsRollup
 
 
 class UsageEventRow(BaseModel):
@@ -184,6 +212,14 @@ class UsageEventRow(BaseModel):
     model_name: str
     whisper_preset: str
     media_kind: str
+    input_bytes: Optional[int] = None
+    media_duration_sec: Optional[float] = None
+    audio_extract_wall_sec: Optional[float] = None
+    whisper_wall_sec: Optional[float] = None
+    transcript_chars: Optional[int] = None
+    extract_llm_sec: Optional[float] = None
+    merge_llm_sec: Optional[float] = None
+    llm_chunks: Optional[int] = None
 
 
 class AdminUsageEventsResponse(BaseModel):
@@ -200,3 +236,32 @@ class UsageAdminNoteRow(BaseModel):
 
 class UsageAdminNoteCreate(BaseModel):
     body: str = Field(default="", min_length=1, max_length=8000)
+
+
+class SuggestionBoxRow(BaseModel):
+    id: int
+    created_at: str
+    updated_at: str
+    author_email: str
+    subject: str
+    body: str
+    page_url: str
+    client_version: str
+    status: Literal["new", "in_progress", "done"]
+    admin_note: str
+
+
+class AdminSuggestionBoxListResponse(BaseModel):
+    items: list[SuggestionBoxRow]
+    total: int
+
+
+class AdminSuggestionBoxPatch(BaseModel):
+    status: Optional[Literal["new", "in_progress", "done"]] = None
+    admin_note: Optional[str] = Field(default=None, max_length=8000)
+
+    @model_validator(mode="after")
+    def _at_least_one(self):
+        if self.status is None and self.admin_note is None:
+            raise ValueError("status または admin_note のどちらかは必須です")
+        return self
