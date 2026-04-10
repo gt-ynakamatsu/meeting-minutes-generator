@@ -17,9 +17,9 @@
 *   **プリセット**: `presets_builtin.json` の会議タイプ（定例・顧客・1on1 等）を選べます。追記・編集で社内用に拡張可能です。
 *   **テキスト / SRT 入力**: 文字起こし済みの `.txt` や `.srt` だけでも議事録生成できます（Whisper をスキップ）。
 *   **書き起こしのみ**: チェックで **Whisper（または .txt/.srt 読み取り）まで**とし、議事録用 LLM（抽出・統合）は実行しません。
-*   **音声認識の品質（Whisper）**: **高速 / 標準 / 高精度**（`whisper_preset`）で faster-whisper の探索の強さを切り替え（動画・音声のみ）。
+*   **音声認識の品質（Whisper）**: **高速 / 標準 / 高精度**（`whisper_preset`）で faster-whisper の探索の強さを切り替え（動画・音声のみ）。**既定は高精度**（UI・API の `TaskSubmitMetadata`・ワーカー未指定時のフォールバック）。
 *   **アーカイブ**: 検索・フィルタ、処理キュー表示、議事録の手直し保存に対応。見出し下に **保存期間の説明**（サーバの `minutes_retention_days` と一致）を表示します。**議事録一覧は 1 ページ最大 10 件**で、それを超える件数があるときは **前へ／次へ** でページ送りします（HTTP API は **`GET /api/records`** の **`limit` / `offset`** と **`{ items, total }`** 応答。詳細は設計書）。
-*   **管理者向け利用状況（認証有効時）**: **`MM_AUTH_SECRET` 有効**かつ **管理者**のみ、設定の **「利用状況」** からジョブ投入の集計を閲覧できます。**議事録本文・書き起こし全文・ファイル名は記録しません**（拡張子から推定した媒体種別、パイプライン種別、Ollama/OpenAI とモデル名、Whisper プリセット、ログイン ID、タスク ID 等）。集計期間は **最大 365 日（1 年）**。運用メモの追記・削除に対応。API は **`GET /api/admin/usage/*`**（設計書 `document/frontend_backend_design.md` §5）。Streamlit から投入したジョブも認証有効なら同様に記録されます（メール未入力時はユーザー列が空になり得ます）。
+*   **管理者向け利用状況（認証有効時）**: **`MM_AUTH_SECRET` 有効**かつ **管理者**のみ、右上メニューの **「利用ログ画面」** からジョブ投入の集計を閲覧できます。**議事録本文・書き起こし全文・ファイル名は記録しません**（拡張子から推定した媒体種別、パイプライン種別、Ollama/OpenAI とモデル名、Whisper プリセット、ログイン ID、タスク ID 等）。**完了ジョブ**については入力ファイルサイズ・媒体の長さ・音声抽出／Whisper／議事録 LLM の処理時間・書き起こし文字数などの**メトリクス**も参照できます（サーバ強化・稟議の根拠用。サマリの集計はメトリクス記録済みのジョブに限定）。集計期間は **最大 365 日（1 年）**。運用メモの追記・削除に対応。API は **`GET /api/admin/usage/*`**（設計書 `document/frontend_backend_design.md` §5.2）。Streamlit から投入したジョブも認証有効なら同様に記録されます（メール未入力時はユーザー列が空になり得ます）。
 *   **ヘルプ**: メイン画面の **ヘルプ**（`#help`）から **`HelpPage`** を開き、操作手順に加え **ブラウザ通知の有効化**・**サイト設定**・**HTTPS / 社内 CA 証明書のインストール（Windows）**・**利用状況ログの扱い（プライバシー）** などを参照できます。
 *   **デスクトップ通知**: 通知先 **ブラウザ** を選ぶと、ジョブ完了時に OS 通知を出せます（Chromium 系は **安全なページ**＝多くの場合 **HTTPS** または **localhost / 127.0.0.1** が必要。`http://` の IP や社内ホスト名のみでは無効になりやすい）。詳細はアプリ内ヘルプの「ブラウザ通知を有効にする手順」を参照してください。
 *   **フロント／API 分離**: UI は **React（`frontend/`）**、HTTP API は **FastAPI（`backend/`）**。構成・エンドポイントは **[設計書 `document/frontend_backend_design.md`](document/frontend_backend_design.md)** を参照。
@@ -187,13 +187,13 @@ python3 03_merge.py
 
 *   `frontend/`: **React（Vite）** SPA。本番は Nginx で `dist` を配信。ヘルプ本文は `frontend/src/HelpPage.tsx`（ブラウザ通知・証明書手順を含む）
 *   `backend/`: **FastAPI**（`main.py`・`routes/`）。`GET /api/auth/status` に **`minutes_retention_days`** 等を返し、UI の保存期間表示と整合。`GET /api/records` は **`{ items, total }`** と任意の **`limit` / `offset`**（一覧ページング用）
-*   `database.py`: SQLite・**議事録の保持期限**（`minutes_retention_days` / purge）・認証時の **`data/registry.db`**（ユーザー・**利用ログ** `usage_job_log` / 管理者メモ `usage_admin_notes`）・ユーザー別 `minutes.db`・**議事録一覧**（**`count_recent_records`** / **`get_recent_records`** のフィルタ・ページング）
+*   `database.py`: SQLite・**議事録の保持期限**（`minutes_retention_days` / purge）・認証時の **`data/registry.db`**（ユーザー・**利用ログ** `usage_job_log`（メトリクス列含む） / 管理者メモ `usage_admin_notes`）・ユーザー別 `minutes.db`・**議事録一覧**（**`count_recent_records`** / **`get_recent_records`** のフィルタ・ページング）
 *   `app.py`: Streamlit フロントエンド（レガシー。Markdown 表示・DL）
 *   `tasks.py`: AI 議事録生成パイプライン（Celery ワーカー）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`: 抽出フェーズ用プロンプト
 *   `prompts/prompt_merge.txt`: 統合フェーズ用プロンプト
-*   `document/`: **設計書**（`frontend_backend_design.md`・`architecture_design.md`・`design_spec.md` など）
+*   `document/`: **設計書**（`frontend_backend_design.md`・`architecture_design.md`・`design_spec.md`）と **品質報告**（`coverage_report_2026-04-10.md`）
 *   `scripts/`: デプロイ・クリーンアップ等の補助スクリプト
 
 ## 環境の削除

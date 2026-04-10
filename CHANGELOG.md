@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.8
+
+- **frontend**: 管理者の利用ログを設定ドロワーから分離し、右上メニューの **「利用ログ画面」** で表示（管理者のみ）
+- **docs**: `README.md`・`document/frontend_backend_design.md`・`document/design_spec.md`・`document/architecture_design.md` を専用画面仕様に更新
+
+## 2.3.7
+
+- **database / worker**: **`usage_job_log`** にメトリクス列（**`input_bytes`**、**`media_duration_sec`**、**`audio_extract_wall_sec`**、**`whisper_wall_sec`**、**`transcript_chars`**、**`extract_llm_sec`** / **`merge_llm_sec`**、**`llm_chunks`**）。受付時・完了時に **`record_usage_job_submission`** / **`update_usage_job_metrics`** で更新
+- **api**: **`AdminUsageSummaryResponse.metrics_rollup`**（**`UsageMetricsRollup`**）、**`UsageEventRow`** のメトリクスフィールド。**`GET /api/admin/usage/summary`** の集計は **`transcript_chars` 記録済み行**を対象
+- **frontend**: 利用状況タブに **「負荷・容量の目安」** とイベント表のメトリクス列
+- **docs**: `document/frontend_backend_design.md` §5.2・変更履歴 1.24、`design_spec.md`、`architecture_design.md`、README
+
 ## 2.3.6
 
 - **api**: `GET /api/records` がクエリ `limit` / `offset` に対応し、本文を **`{ "items", "total" }`** で返す（**破壊的変更**: 従来の配列直返しではない）。`RecordsPageResponse`（`backend/schemas.py`）。Streamlit は `limit` 省略で全件のまま

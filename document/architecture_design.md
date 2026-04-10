@@ -1,5 +1,7 @@
 # AI議事録作成・アーカイブ 詳細アーキテクチャ設計書
 
+> 品質確認（カバレッジ計測結果、実装・テストの対応、再現手順）は `document/coverage_report_2026-04-10.md` を参照。
+
 ## 1. システム全体構成図
 
 本システムは、Docker Composeによってオーケストレーションされた複数のコンテナサービスで構成されます。
@@ -127,6 +129,17 @@ sequenceDiagram
 6.  `completed`: 全処理完了（マージのみ失敗時は **`summary` が `Merge failed` で始まる**ことがある）
 7.  `cancelled`: ユーザー破棄、または **`fail()`**／外側 **`except`** による失敗（`summary` にエラー要約）
 
+### 3.3 ワーカー主要パラメータ（設計根拠の参照先）
+
+**Ollama `num_ctx`（既定 4096）**、**チャンク（75 秒 / 6000 文字）**、**参考資料長上限 `MM_SUPPLEMENTARY_MAX_CHARS`**、**Whisper プリセット**、**Celery 並列 1**、**GT-2222（RTX 2060 6GB 級）での指針**など、**「なぜその値か」**の根拠表とトレードオフの説明は **`document/design_spec.md` §3.1.2** を正とする。本アーキテクチャ書では実装箇所の参照のみ示す。
+
+| 観点 | 実装の入口 |
+| :--- | :--- |
+| チャンク分割 | **`tasks.build_chunks_from_segments`**（`CHUNK_SEC` / `CHAR_CHUNK`） |
+| Ollama オプション | **`tasks.call_llm`** → **`backend.ollama_model_profiles.resolve_ollama_options`** |
+| 参考テキスト上限 | **`tasks._build_supplementary_reference_text`**（`MM_SUPPLEMENTARY_MAX_CHARS`） |
+| Whisper 品質 | **`tasks.process_video_task`** 内 `whisper_preset`（`llm_config` 経由） |
+
 ## 4. データモデル設計 (Physical)
 
 議事録本体は SQLite3（ユーザー別 **`data/user_data/.../minutes.db`** または従来 **`data/minutes.db`**）。認証有効時は **`data/registry.db`** にユーザーと利用ログを保持（**§4.1**）。
@@ -150,7 +163,7 @@ sequenceDiagram
 | テーブル | 説明 |
 | :--- | :--- |
 | `users` | ログイン ID（列名 `username`＝正規化メール）、bcrypt ハッシュ、`is_admin` |
-| **`usage_job_log`** | ジョブ受付ごとに 1 行。`task_id` UNIQUE。**議事録・書き起こし本文・ファイル名文字列は保存しない**（`media_kind` は拡張子から推定） |
+| **`usage_job_log`** | ジョブ受付ごとに 1 行。`task_id` UNIQUE。**議事録・書き起こし本文・ファイル名文字列は保存しない**（`media_kind` は拡張子から推定）。**`input_bytes`**（受付時）および完了時メトリクス（**`media_duration_sec`**, **`whisper_wall_sec`**, **`transcript_chars`** 等。詳細は **`document/frontend_backend_design.md` §5.2**） |
 | **`usage_admin_notes`** | 管理者が画面から追記する運用メモ |
 
 API・ワーカー双方が `./data` をマウントするため、**api** が `POST /api/tasks` 受付時に書き込んだログは **registry** に永続化され、**GET `/api/admin/usage/*`** で集計される。
@@ -174,6 +187,7 @@ API・ワーカー双方が `./data` をマウントするため、**api** が `
 
 ### 5.1 HTTPS + サブパス公開（GT-2222 運用）
 
+- **GPU 代表構成（RTX 2060 6GB 級）**での Ollama **`num_ctx`**・チャンク・参考資料上限の指針は **`document/design_spec.md` §3.1.2**（本サーバは **VRAM 6GB** を前提に **4096 維持推奨**など）。
 - 外部公開はホスト Nginx で TLS 終端し、`/meetingminutesnotebook/` を `http://127.0.0.1:8085/meetingminutesnotebook/` にリバースプロキシする。
 - Compose の `.env` は以下を必須とする。
   - `VITE_BASE_PATH=/meetingminutesnotebook/`
@@ -190,11 +204,11 @@ API・ワーカー双方が `./data` をマウントするため、**api** が `
 
 ## 6. セキュリティと制約事項
 
-*   **認証**: 環境変数 `MM_AUTH_SECRET` 設定時に **JWT（Bearer）＋ registry DB** によるログインを有効化。`data/registry.db` の `users` テーブルにパスワードハッシュ（bcrypt）と `is_admin` を保持。ログイン ID は **メールアドレス**（DB 主キー列名は `username`）。ユーザーが 0 件の初回のみ、ブラウザの **初回セットアップ**（または `MM_BOOTSTRAP_ADMIN_*`）で最初の管理者を登録可能。管理者は **設定ドロワーの「ユーザー・権限」タブ**から追加ユーザー・パスワード再設定・管理者権限の付与・解除が可能。**「利用状況」タブ**では **`usage_job_log`** の集計（**最大 365 日**、**議事録・書き起こし本文は含まない**）と **`usage_admin_notes`** の編集が可能（**§4.1**・**`frontend_backend_design.md` §5.2**）。議事録本体はユーザー別に `data/user_data/<slug>/minutes.db`（従来は `data/minutes.db`）。
+*   **認証**: 環境変数 `MM_AUTH_SECRET` 設定時に **JWT（Bearer）＋ registry DB** によるログインを有効化。`data/registry.db` の `users` テーブルにパスワードハッシュ（bcrypt）と `is_admin` を保持。ログイン ID は **メールアドレス**（DB 主キー列名は `username`）。ユーザーが 0 件の初回のみ、ブラウザの **初回セットアップ**（または `MM_BOOTSTRAP_ADMIN_*`）で最初の管理者を登録可能。管理者は **設定ドロワーの「ユーザー・権限」タブ**から追加ユーザー・パスワード再設定・管理者権限の付与・解除が可能。**「利用ログ画面」**では **`usage_job_log`** の集計（**最大 365 日**、**議事録・書き起こし本文は含まない**）・**メトリクス（入力サイズ・処理時間・文字数等）**と **`usage_admin_notes`** の編集が可能（**§4.1**・**`frontend_backend_design.md` §5.2**）。議事録本体はユーザー別に `data/user_data/<slug>/minutes.db`（従来は `data/minutes.db`）。
 *   **秘密情報と設定の所在（外部流出防止）**: **JWT 署名鍵・TTL・自己登録可否**は `backend/auth_settings.py` が環境変数（`MM_AUTH_SECRET` 等）から読み取る。**CORS**は `backend/main.py`（**HTTP ハンドラ本体**は `backend/routes/`）。**registry を認証前提とするか**は `database.py` が `MM_AUTH_SECRET` の有無で判定。これらの**秘密鍵・パスワード・利用者 API キー**をフロントの `VITE_*` やリポジトリ・スクリーンショットに含めないこと。詳細な区分（何が秘密か、ポートは秘密ではないか、チェックリスト）は **`document/frontend_backend_design.md` §7.1〜7.4** に明記する。
-*   **同時実行数**: Celery Workerの `concurrency` は **1** に設定。GPUメモリ制限のため、複数の重量級タスク（Whisper/LLM）の並列実行は行わない。
+*   **同時実行数**: Celery Workerの `concurrency` は **1** に設定。GPUメモリ制限のため、複数の重量級タスク（Whisper/LLM）の並列実行は行わない（**`design_spec.md` §3.1.2**）。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
 *   **議事録 DB の保存期限**: **`MM_MINUTES_RETENTION_DAYS`**（詳細は **§4.2**）。既定 **30 日**。詳細な環境変数一覧は **`document/frontend_backend_design.md` §7.1** を参照。
 
 ---
-*Last Updated: 2026-03-30（§4 に registry・利用ログ。§3.1 シーケンスに記録タイミング注記。§6 に利用状況とプライバシー。§2.2・§3.2・§5 は現行 `tasks`/`ollama_client` に同期）*
+*Last Updated: 2026-04-03（**§3.3** 追加: パラメータ根拠は `design_spec.md` §3.1.2 へ集約。§6 並列度に相互参照）*
