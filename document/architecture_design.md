@@ -170,9 +170,9 @@ API・ワーカー双方が `./data` をマウントするため、**api** が `
 
 ### 4.2 議事録レコードの保存期限と自動削除
 
-- **`database.py`** の **`minutes_retention_days()`** が環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈する。**未設定・非数時は `DEFAULT_MINUTES_RETENTION_DAYS`（30、約1か月）**。値が **183**（旧いちばん多かった既定）のときは **30 日として扱う**。**0 以下**で自動削除は行わない。
+- **`database.py`** の **`minutes_retention_days()`** が環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈する。**未設定・非数時は `DEFAULT_MINUTES_RETENTION_DAYS`（90、約3か月）**。値が **183**（旧いちばん多かった既定）のときは **90 日として扱う**。**0 以下**で自動削除は行わない。
 - **`purge_expired_minutes_db_path`**（および **`purge_expired_minutes`** / **`purge_all_minutes_archives`**）が、**`created_at` が現在より N 日より前**のレコードを対象に、**`status` が `pending` または `processing` で始まるものを除き**、関連アップロード等を掃除したうえで **DELETE** する。
-- パージは **API 起動時（`backend/main.py` の lifespan）**、一覧取得前・タスク処理後など複数箇所から呼ばれる。Docker Compose では **api**・**worker** に **`MM_MINUTES_RETENTION_DAYS`** を渡し、未指定時の注入既定は **30**（**`:-30`**）。
+- パージは **API 起動時（`backend/main.py` の lifespan）**、一覧取得前・タスク処理後など複数箇所から呼ばれる。Docker Compose では **api**・**worker** に **`MM_MINUTES_RETENTION_DAYS`** を渡し、未指定時の注入既定は **90**（**`:-90`**）。
 - フロントは **`GET /api/auth/status` の `minutes_retention_days`** で UI の保存期間説明とサーバ実装を一致させる。
 
 ## 5. ネットワーク設計
@@ -208,7 +208,7 @@ API・ワーカー双方が `./data` をマウントするため、**api** が `
 *   **秘密情報と設定の所在（外部流出防止）**: **JWT 署名鍵・TTL・自己登録可否**は `backend/auth_settings.py` が環境変数（`MM_AUTH_SECRET` 等）から読み取る。**CORS**は `backend/main.py`（**HTTP ハンドラ本体**は `backend/routes/`）。**registry を認証前提とするか**は `database.py` が `MM_AUTH_SECRET` の有無で判定。これらの**秘密鍵・パスワード・利用者 API キー**をフロントの `VITE_*` やリポジトリ・スクリーンショットに含めないこと。詳細な区分（何が秘密か、ポートは秘密ではないか、チェックリスト）は **`document/frontend_backend_design.md` §7.1〜7.4** に明記する。
 *   **同時実行数**: Celery Workerの `concurrency` は **1** に設定。GPUメモリ制限のため、複数の重量級タスク（Whisper/LLM）の並列実行は行わない（**`design_spec.md` §3.1.2**）。
 *   **データ保護**: データはローカルボリュームに保存され、外部クラウドには送信されない。
-*   **議事録 DB の保存期限**: **`MM_MINUTES_RETENTION_DAYS`**（詳細は **§4.2**）。既定 **30 日**。詳細な環境変数一覧は **`document/frontend_backend_design.md` §7.1** を参照。
+*   **議事録 DB の保存期限**: **`MM_MINUTES_RETENTION_DAYS`**（詳細は **§4.2**）。既定 **90 日**。詳細な環境変数一覧は **`document/frontend_backend_design.md` §7.1** を参照。
 
 ---
 *Last Updated: 2026-04-03（**§3.3** 追加: パラメータ根拠は `design_spec.md` §3.1.2 へ集約。§6 並列度に相互参照）*

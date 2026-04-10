@@ -25,7 +25,7 @@
 | | 構造化要約 | **Ollama**（モデル名はユーザー指定。既定例: qwen2.5:7b）または **OpenAI API**（環境・認証設定に応じて）で、決定事項・課題・アクション・メモに自動分類・整理する。 |
 | | **Ollama モデル候補** | API が `OLLAMA_BASE_URL` の Ollama **`/api/tags`** を中継し、フロントは一覧を **`<select>`（候補のみ）**で表示。ブラウザから Ollama へ直アクセスしない。 |
 | | **OpenAI 機能フラグ** | 環境変数 **`MM_OPENAI_ENABLED`**（`feature_flags.py`）で OpenAI 連携をオフにできる。オフ時は UI・API とも OpenAI 経路を使わず Ollama のみ（課金 API の無効化・既定 Docker 向け）。 |
-| **管理** | 履歴管理 | 過去の議事録をデータベースで一元管理。**サーバは環境変数 `MM_MINUTES_RETENTION_DAYS`（既定 30 日≒約1か月）に基づき、古いレコードを自動削除**（待機・処理中は除く）。React は **`/api/auth/status` の `minutes_retention_days`** を使い、アーカイブ見出し下に保存期間を表示。 |
+| **管理** | 履歴管理 | 過去の議事録をデータベースで一元管理。**サーバは環境変数 `MM_MINUTES_RETENTION_DAYS`（既定 90 日≒約3か月）に基づき、古いレコードを自動削除**（待機・処理中は除く）。React は **`/api/auth/status` の `minutes_retention_days`** を使い、アーカイブ見出し下に保存期間を表示。 |
 | | 自動クリーンアップ | 処理パイプライン完了後の**中間ファイル**（抽出音声・動画等）の削除に加え、**期限切れ議事録レコード**と関連アップロードの削除（**`database.py` の purge**。詳細は **`document/frontend_backend_design.md` §7.1**）。 |
 | | **利用状況ログ（管理者）** | **`MM_AUTH_SECRET` 有効時**、管理者のみ設定の **「利用状況」** でジョブ投入の集計を閲覧。**議事録本文・書き起こし・ファイル名は記録しない**（メタデータと拡張子由来の媒体種別のみ）。**完了ジョブ**については入力サイズ・媒体の長さ・Whisper／議事録 LLM の壁時計・書き起こし文字数などの**メトリクス**を参照可能（サーバ強化・稟議の根拠用。サマリの **`metrics_rollup`** は **`transcript_chars` 記録済み行**に限定）。集計期間 **最大 365 日**。Ollama/OpenAI ごとの **モデル別内訳**、運用メモの CRUD。詳細は **`document/frontend_backend_design.md` §5.2**。 |
 | **認証** | 初回セットアップ | `MM_AUTH_SECRET` 有効時、ユーザー 0 件なら Web で最初の管理者（**メールアドレス・パスワード**）を登録。 |

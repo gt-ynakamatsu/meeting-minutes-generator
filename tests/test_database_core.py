@@ -136,7 +136,12 @@ def test_context_usage_and_admin_usage_helpers(isolated_db):
         whisper_preset="accurate",
         original_filename="f.mp3",
         input_bytes=10,
+        notification_type="email",
+        has_supplementary_teams=True,
+        has_supplementary_notes=False,
     )
+    db.record_usage_guard_event("rate_limited", "u@example.com")
+    db.record_usage_guard_event("upload_too_large", "u@example.com")
     db.update_usage_job_metrics(
         "u1",
         input_bytes=10,
@@ -154,6 +159,11 @@ def test_context_usage_and_admin_usage_helpers(isolated_db):
     items, total = db.admin_usage_events(7, limit=10, offset=0)
     assert total >= 1
     assert len(items) >= 1
+    settings_summary = db.admin_usage_settings_summary(7)
+    assert settings_summary["total_submissions"] >= 1
+    assert len(settings_summary["notification_breakdown"]) >= 1
+    assert settings_summary["supplementary_teams_used"]["count"] >= 1
+    assert settings_summary["total_guard_events"] >= 2
 
     nid = db.usage_admin_note_add("admin@example.com", " note ")
     assert nid is not None
@@ -170,11 +180,11 @@ def test_purge_expired_minutes_and_files(isolated_db):
     with sqlite3.connect(path) as conn:
         conn.execute(
             "INSERT INTO records (id, email, filename, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("old1", "a@example.com", "x.mp3", "completed", datetime.now() - timedelta(days=50)),
+            ("old1", "a@example.com", "x.mp3", "completed", datetime.now() - timedelta(days=120)),
         )
         conn.execute(
             "INSERT INTO records (id, email, filename, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("old2", "a@example.com", "x.mp3", "pending", datetime.now() - timedelta(days=50)),
+            ("old2", "a@example.com", "x.mp3", "pending", datetime.now() - timedelta(days=120)),
         )
     os.makedirs("downloads", exist_ok=True)
     with open(os.path.join("downloads", "old1_tmp.bin"), "w", encoding="utf-8") as f:
@@ -478,6 +488,11 @@ def test_database_more_guard_and_exception_paths(isolated_db, monkeypatch, tmp_p
     monkeypatch.setattr(db.os.path, "exists", lambda _p: True)
     monkeypatch.setattr(db.sqlite3, "connect", lambda *_a, **_k: _ConnOpErr())
     db.update_usage_job_metrics("t", input_bytes=1)
+
+    # guard event invalid type / exception
+    db.record_usage_guard_event("unknown", "u@example.com")
+    monkeypatch.setattr(db.sqlite3, "connect", lambda *_a, **_k: _ConnOpErr())
+    db.record_usage_guard_event("rate_limited", "u@example.com")
 
     # admin_usage_summary: transcript_only rows continue / ollama count path / metrics except
     class _ConnSummary:

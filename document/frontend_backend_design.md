@@ -132,6 +132,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | DELETE | `/api/admin/users/{login_email}` | **管理者のみ**。自分自身・最後の管理者は不可 |
 | GET | `/api/admin/usage/summary` | **管理者のみ**。クエリ **`days`**（1〜**365**、既定 30）。**`AdminUsageSummaryResponse`**（`backend/schemas.py`）。投入件数・書き起こしのみ／議事録生成の割合・Ollama/OpenAI 件数・**Ollama/OpenAI それぞれの議事録生成ジョブに対するモデル別内訳**・動画・音声向け Whisper プリセット集計・媒体種別（拡張子から推定）に加え、**`metrics_rollup`**（**`UsageMetricsRollup`**）。完了ジョブでメトリクスが記録された件向けの合計・平均（入力バイト、媒体の長さ、音声抽出・Whisper・議事録 LLM の壁時計、書き起こし文字数、LLM チャンク数など。詳細は **§5.2**）。**認証シークレット未設定時は空集計** |
 | GET | `/api/admin/usage/events` | **管理者のみ**。クエリ **`days`**（1〜365）、**`limit`**（1〜500）、**`offset`**。直近の投入ログ行一覧と総件数（ページング用）。各行は **§5.2** のメトリクス列（`input_bytes` 等）を含む（未記録は `null`） |
+| GET | `/api/admin/usage/settings-summary` | **管理者のみ**。クエリ **`days`**（1〜365）。通知方式（`notification_type`）・参考資料添付率（Teams/メモ/いずれか）・防御イベント件数（`rate_limited` / `upload_too_large` / `disk_low`）を返す。 |
 | GET | `/api/admin/usage/notes` | **管理者のみ**。運用メモ一覧（新しい順） |
 | POST | `/api/admin/usage/notes` | **管理者のみ**。`{ "body": "…" }`（1〜8000 文字）でメモ追加。著者は JWT の `sub`（ログイン ID） |
 | DELETE | `/api/admin/usage/notes/{note_id}` | **管理者のみ**。メモ削除 |
@@ -161,11 +162,12 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 
 ### 5.2 利用状況ログ（registry・管理者向け）
 
-- **記録タイミング**: **`MM_AUTH_SECRET` が設定されている**（`_auth_secret_configured()` が真）とき、**ジョブ受付直後**（`save_initial_task` のあと）。**React**: **`POST /api/tasks`** で **`owner`（JWT の `sub`）が空でない**ときのみ。**Streamlit `app.py`**: **`auth_enabled()`** のとき（フォームのメール等でユーザー列を埋める。未入力なら空）。
-- **保存先**: **`data/registry.db`** の **`usage_job_log`**（`task_id` UNIQUE）。マイグレーションは **`database._migrate_usage_tables`**（`init_registry_db` から。メトリクス列は **`database._migrate_usage_job_metrics_columns`**）。
-- **保存するフィールドの要点（メタ）**: `user_email`（正規化）、`transcript_only`、`llm_provider`（`ollama` / `openai`）、`model_name`（当該ジョブで選ばれたモデル）、`whisper_preset`、`media_kind`（**元ファイル名は保存せず**、`database.usage_media_kind_from_filename` が **basename の拡張子のみ**から `video` / `audio` / `srt` / `txt` / `other` を決定）。**議事録本文・書き起こし全文は含めない**。
+- **記録タイミング**: **`MM_AUTH_SECRET` が設定されている**（`_auth_secret_configured()` が真）とき、**ジョブ受付直後**（`save_initial_task` のあと）。**React**: **`POST /api/tasks`** で記録（ユーザー未特定時は `user_email` が空）。**Streamlit `app.py`**: **`auth_enabled()`** のとき（フォームのメール等でユーザー列を埋める。未入力なら空）。
+- **保存先**: **`data/registry.db`** の **`usage_job_log`**（`task_id` UNIQUE）および **`usage_guard_events`**。マイグレーションは **`database._migrate_usage_tables`**（`init_registry_db` から。メトリクス列は **`database._migrate_usage_job_metrics_columns`**、設定利用列は **`database._migrate_usage_job_feature_columns`**）。
+- **保存するフィールドの要点（メタ）**: `user_email`（正規化）、`transcript_only`、`llm_provider`（`ollama` / `openai`）、`model_name`（当該ジョブで選ばれたモデル）、`whisper_preset`、`notification_type`、`has_supplementary_teams`、`has_supplementary_notes`、`media_kind`（**元ファイル名は保存せず**、`database.usage_media_kind_from_filename` が **basename の拡張子のみ**から `video` / `audio` / `srt` / `txt` / `other` を決定）。**議事録本文・書き起こし全文は含めない**。
 - **メトリクス（負荷・稟議・容量の目安）**: 受付時に **`input_bytes`**（アップロード本体のバイト数。API は読み込んだ `body` の長さ、Streamlit は保存後ファイルのサイズ）。ジョブ**完了時**にワーカー（**`tasks.process_video_task`** 等）が **`database.update_usage_job_metrics`** で更新する列として、**`media_duration_sec`**（動画・音声の再生相当の長さ。セグメント等から推定）、**`audio_extract_wall_sec`**（動画から音声抽出の壁時計）、**`whisper_wall_sec`**（faster-whisper 文字起こしの壁時計）、**`transcript_chars`**（書き起こしの文字数）、**`extract_llm_sec`** / **`merge_llm_sec`**（議事録用 LLM のチャンク抽出・マージの壁時計）、**`llm_chunks`**（抽出 LLM のチャンク数）がある。**`.txt`/`.srt` 直投入**など経路によっては一部が 0 または未使用。
 - **管理者 API の集計**: **`GET /api/admin/usage/summary`** の **`metrics_rollup`** は、期間内の行のうち **`transcript_chars IS NOT NULL`**（完了時にメトリクスが書き込まれたジョブ）のみを対象に合計・平均を算出する。**未完了・失敗でメトリクス未更新のジョブは含まれない**。
+- **防御イベント**: レート制限（429）、容量不足（503）、サイズ超過（413）を `usage_guard_events` に `event_type` と匿名化した `actor_key_hash` で記録し、**`GET /api/admin/usage/settings-summary`** で件数確認できる。
 - **運用メモ**: 同じ registry の **`usage_admin_notes`**。**`database.usage_admin_note_*`** と上記 **`/api/admin/usage/notes`**。
 - **集計の上限**: サマリ・イベントとも **クエリ `days` は最大 365**（サーバ側でも `database.admin_usage_*` でクランプ）。
 
@@ -180,7 +182,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **右上アカウントメニュー**: ユーザーアイコンを押すとドロップダウンを表示。**メイン画面**では「設定」「サインイン／サインアウト」。認証かつ管理者のときは追加で「ユーザー・権限管理」「**利用ログ画面**」（管理者専用のログ画面を開く）。**初回セットアップ／ログイン画面**では「説明・設定」「フォームへ」（スクロール／フォーカス）。
 - **設定ドロワー（右スライド）**: 「設定」で開く。認証時は **一般**タブにアカウント表示・**OpenAI（サーバ保存キー・モデル、`GET/PATCH /api/me/llm`）** 等。**`openai_enabled`（auth/status）が偽**のときは OpenAI 登録 UI を出さない（環境で `MM_OPENAI_ENABLED` オフ）。`is_admin` のときのみタブ **ユーザー・権限** を表示する。利用ログは右上メニューの **利用ログ画面** で期間選択（7 / 30 / 90 / **365 日**）、サマリ・**メトリクス集計（負荷・容量の目安）**・イベント一覧（行ごとのメトリクス列）・運用メモ（**`frontend/src/api.ts`** の **`adminUsageSummary`** / **`adminUsageEvents`** 等。**`AdminUsageSummary.metrics_rollup`**）を確認する。**ヘルプ**（`HelpPage`）に利用ログの範囲とプライバシーを記載。一般タブのアカウント欄に「管理者」と表示される場合がある。
 - **ヘルプ**: **`HelpPage`**（`#help`）。メインタイトル横の「ヘルプ」ボタン・アカウントメニューから開く。使い方・Whisper 品質・通知などを集約。
-- **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 30 は UI 上「約1か月（30日）」）。文言はサーバ返却値と一致させる。**一覧は 1 ページあたり最大 10 件**（`ARCHIVE_PAGE_SIZE`）。**総件数が 10 を超える**とき、一覧下に **前へ／次へ** と **現在ページ／総ページ・全件数** を表示し、**`GET /api/records?limit=10&offset=…`** で取得する。キーワード・分類・ステータスを変えたときは **1 ページ目に戻す**。削除等で現在ページが空になった場合は **最終ページへ寄せて再取得**する。
+- **議事録アーカイブ**: 見出しの**直下**（横並びではなくブロック下）に、**`minutes_retention_days`** に基づく**保存期間・自動削除**の説明文を表示（例: 既定 90 は UI 上「約3か月（90日）」）。文言はサーバ返却値と一致させる。**一覧は 1 ページあたり最大 10 件**（`ARCHIVE_PAGE_SIZE`）。**総件数が 10 を超える**とき、一覧下に **前へ／次へ** と **現在ページ／総ページ・全件数** を表示し、**`GET /api/records?limit=10&offset=…`** で取得する。キーワード・分類・ステータスを変えたときは **1 ページ目に戻す**。削除等で現在ページが空になった場合は **最終ページへ寄せて再取得**する。
 - **音声認識の品質（Whisper）**: 左パネル「解析設定」で **`whisper_preset`** を **`<select>`** で選択。ラベル・ツールチップはユーザー向け日本語（所要時間・精度のトレードオフを説明）。
 - **フォームの `<select>`**: 左サイドバー・設定ドロワー等のプルダウンは、**`onChange` 後に `blur()`** してフォーカスリングが残りにくいようにしている。
 - **Ollama モデル欄**: **初回マウント時と認証状態更新時（`authNonce`）のみ** **`GET /api/ollama/models`** で候補を取得（**ページ再読み込みで更新**。ウィンドウフォーカスや定期ポーリングは行わない）。**ネイティブ `<select>`** で候補のみ選択（手入力不可）。現在値が一覧に無い場合は先頭候補へ寄せる。
@@ -195,7 +197,9 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 - **API キー**: フロントから OpenAI キーを送る設計のため、**HTTPS 必須**の本番運用を推奨。社内 VPN 内のみの利用を前提とする。
 - **認証**: `MM_AUTH_SECRET`（十分に長いランダム文字列）を設定すると JWT 認証が有効。初回は **ユーザー 0 件のときだけ** `POST /api/auth/bootstrap` または `MM_BOOTSTRAP_ADMIN_USER` / `MM_BOOTSTRAP_ADMIN_PASSWORD` で最初の管理者を作成可能。外向き公開する場合は HTTPS・IP 制限・WAF 等と併用すること。
 - **CORS**: `CORS_ORIGINS` 環境変数（カンマ区切り）。開発時は `http://localhost:5173` を含める。LAN の IP でフロントにアクセスする場合は当該オリジンも列挙する。
-- **アップロード上限**: Nginx `client_max_body_size 2000m`（従来 Streamlit 設定に合わせた目安）。
+- **アップロード上限**: Nginx `client_max_body_size 5g`。
+- **運用推奨**: 2GB を超える素材は事前分割して投入する。
+- **API 防御**: `POST /api/tasks` でファイル本体をチャンク保存しつつ上限（既定 5GiB）を検証。一定時間あたりの投入件数を制限（429）し、`downloads` の空き容量が閾値未満の場合は受付を拒否（503）。
 
 ### 7.1 設定・秘密情報の「どこに書くか」（コード所在）
 
@@ -204,7 +208,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | JWT 署名鍵・トークン TTL・自己登録可否 | `backend/auth_settings.py`（`MM_AUTH_SECRET`, `MM_AUTH_TOKEN_HOURS`, `MM_AUTH_SELF_REGISTER`） | **秘密鍵はこのモジュール経由でサーバ内のみ**。クライアント JS に含めない。 |
 | registry を使うか（認証の前提） | `database.py` の `_auth_secret_configured()`（`MM_AUTH_SECRET` の有無） | 上記と同じ環境変数を参照。 |
 | CORS 許可オリジン | `backend/main.py`（環境変数 `CORS_ORIGINS`。Compose では `MM_CORS_ORIGINS` から注入） | **ルートハンドラ**は `backend/routes/`。秘密ではないが、**許可先を広げすぎない**こと。 |
-| 議事録の保存期限・自動削除 | **`database.py`**: **`DEFAULT_MINUTES_RETENTION_DAYS`（30）**、**`minutes_retention_days()`**（環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈。**未設定・非数時は 30**。**値が 183 のときは 30 日として扱う** — 旧既定からの移行）、**`purge_expired_minutes_db_path`** 等 | **`created_at` が N 日より古い**レコードを対象に、**`pending` と `processing%` を除き**関連ファイル掃除のうえ **DELETE**。**N≤0** で自動削除オフ。起動時 **`main.py` lifespan**、一覧取得前・タスク完了後などで実行。Compose は api/worker に **`MM_MINUTES_RETENTION_DAYS`**（既定注入 **`:-30`**）を渡す。フロントは **`/api/auth/status` の `minutes_retention_days`** で文言と一致させる |
+| 議事録の保存期限・自動削除 | **`database.py`**: **`DEFAULT_MINUTES_RETENTION_DAYS`（90）**、**`minutes_retention_days()`**（環境変数 **`MM_MINUTES_RETENTION_DAYS`** を解釈。**未設定・非数時は 90**。**値が 183 のときは 90 日として扱う** — 旧既定からの移行）、**`purge_expired_minutes_db_path`** 等 | **`created_at` が N 日より古い**レコードを対象に、**`pending` と `processing%` を除き**関連ファイル掃除のうえ **DELETE**。**N≤0** で自動削除オフ。起動時 **`main.py` lifespan**、一覧取得前・タスク完了後などで実行。Compose は api/worker に **`MM_MINUTES_RETENTION_DAYS`**（既定注入 **`:-90`**）を渡す。フロントは **`/api/auth/status` の `minutes_retention_days`** で文言と一致させる |
 | 議事録一覧（フィルタ・件数・ページング） | **`database.py`**: **`_recent_records_where_clause`**、**`count_recent_records`**、**`get_recent_records(..., limit=None, offset=0)`**（`limit` 省略時は **LIMIT なし**で全件。指定時は **`ORDER BY created_at DESC` + `LIMIT`/`OFFSET`**） | **`routes/records.py`** の **`GET /api/records`** が `count_recent_records` と `get_recent_records` を呼び **`RecordsPageResponse`** を返す。React の **`listRecords`**（`frontend/src/api.ts`）が `limit`/`offset` を付与可能 |
 | OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
 | API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
@@ -213,7 +217,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | エクスポートヘッダ・行 dict 化 | **`backend/http_utils.py`** | **`routes/records.py`** で利用。 |
 | ログイン時パスワード検証 | **`backend/passwords.py`** | **`routes/auth.py`** で利用。 |
 | ユーザープロンプト・参考資料一時保存 | **`backend/storage.py`**（**`merge_task_prompt_paths`**） | **`routes/jobs.py`**（multipart）と **Streamlit `app.py`**（**`save_uploaded_prompts`** 経由）が同じ保存規約を使う。 |
-| 管理者向け利用ログ・集計 | **`database.py`**: **`record_usage_job_submission`**（**`input_bytes`** 含む）、**`update_usage_job_metrics`**、**`admin_usage_summary`**（**`metrics_rollup`**）、**`admin_usage_events`**、**`usage_admin_notes_*`**（テーブル **`usage_job_log`**, **`usage_admin_notes`**）。**`routes/jobs.py`**（認証かつ `owner` ありで記録）、**`app.py`**（**`auth_enabled()`** 時）、**`tasks.py`**（完了時メトリクス更新）。**`routes/admin.py`**（**`/api/admin/usage/*`**） | **議事録・書き起こし本文は保存しない**。集計期間 **最大 365 日**。メトリクス集計は **`transcript_chars` 記録済み行**に限定（**§5.2**）。 |
+| 管理者向け利用ログ・集計 | **`database.py`**: **`record_usage_job_submission`**（**`input_bytes`** / `notification_type` / 参考資料有無 含む）、**`record_usage_guard_event`**、**`update_usage_job_metrics`**、**`admin_usage_summary`**（**`metrics_rollup`**）、**`admin_usage_events`**、**`admin_usage_settings_summary`**、**`usage_admin_notes_*`**（テーブル **`usage_job_log`**, **`usage_guard_events`**, **`usage_admin_notes`**）。**`routes/jobs.py`**（受付時に記録）、**`app.py`**（**`auth_enabled()`** 時）、**`tasks.py`**（完了時メトリクス更新）。**`routes/admin.py`**（**`/api/admin/usage/*`**） | **議事録・書き起こし本文は保存しない**。集計期間 **最大 365 日**。メトリクス集計は **`transcript_chars` 記録済み行**に限定（**§5.2**）。 |
 | メール通知（SMTP） | API・ワーカー双方に **`MM_SMTP_*`**（`MM_SMTP_HOST`, `MM_SMTP_FROM` 必須など。詳細は `.env.example`） | `email_notify_available` の判定とタスク検証に使用。 |
 | ホスト公開ポート・ブローカ URL | `docker-compose.yml`、`.env` / `.env.example` | **ポート番号自体は「秘密」ではない**が、不要なポートを外向きに開かない運用とセット。 |
 | フロントの API ベース URL | ビルド時 `VITE_API_BASE` → `frontend/src/api.ts` の `PREFIX` | **公開してよい URL のみ**（後述）。 |
@@ -290,7 +294,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - API・ワーカー: **`OLLAMA_BASE_URL`**（API は **`/api/tags`**、ワーカーは推論）、**`MM_OPENAI_ENABLED`**
   - ワーカー: `CELERY_BROKER_URL`、`WEBHOOK_URL`
   - メール通知: **`MM_SMTP_*`**（API とワーカーで同一値を推奨）
-  - 議事録 DB 保持: **`MM_MINUTES_RETENTION_DAYS`**（**`database.minutes_retention_days()`**。未設定時は **30**。**183 は 30 として扱う**。**0 以下**で自動削除オフ。Compose 既定 **`:-30`**）
+  - 議事録 DB 保持: **`MM_MINUTES_RETENTION_DAYS`**（**`database.minutes_retention_days()`**。未設定時は **90**。**183 は 90 として扱う**。**0 以下**で自動削除オフ。Compose 既定 **`:-90`**）
   - ワーカー（参考資料）: **`MM_SUPPLEMENTARY_MAX_CHARS`** … Teams/メモ参考テキスト結合後の**文字数上限**（既定 **120000**）。**ワーカー import 時**に読み取り。**変更後は worker 再起動**。**根拠・トレードオフ**は **`document/design_spec.md` §3.1.2**
   - ワーカー（Ollama オプション上書き）: **`MM_OLLAMA_PROFILES_PATH`** … JSON で **`num_ctx` 等**をモデル名プレフィックス別に指定（**`config/ollama_profiles.example.json`**）。**`MM_OLLAMA_PROFILES=0`** で無効
   - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（**`pipeline/02_extract.py`**・**`03_merge.py`**）。いずれも **`_ollama_generate_url()`** で URL を組み立て、**`num_ctx` 4096**・**タイムアウト 600 秒**（**`02_extract`** はペイロード内、**`03_merge`** は **`NUM_CTX` / `REQ_TIMEOUT`**）。**`extract_json_block`** は **`02_extract` 内の関数**（**`tasks.py` に同名関数**があり、ワーカーはそちらを使用。共通化モジュールはない）

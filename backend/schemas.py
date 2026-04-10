@@ -66,7 +66,7 @@ class AuthStatusResponse(BaseModel):
     openai_enabled: bool = True
     # SMTP 設定済みかつ宛先あり（管理者メール or MM_ERROR_REPORT_TO）のとき True
     error_report_available: bool = False
-    # MM_MINUTES_RETENTION_DAYS（未設定時 30≒1か月）。0 以下のとき自動削除は行わない
+    # MM_MINUTES_RETENTION_DAYS（未設定時 90≒3か月）。0 以下のとき自動削除は行わない
     minutes_retention_days: int
 
 
@@ -168,6 +168,17 @@ class UsageMediaKindRow(BaseModel):
     pct: float
 
 
+class UsageValueBreakdownRow(BaseModel):
+    value: str
+    count: int
+    pct: float
+
+
+class UsageGuardEventCountRow(BaseModel):
+    event_type: str
+    count: int
+
+
 class UsageMetricsRollup(BaseModel):
     """完了ジョブでメトリクスが記録された件（transcript_chars あり）のみを対象とした集計。"""
 
@@ -225,6 +236,17 @@ class UsageEventRow(BaseModel):
 class AdminUsageEventsResponse(BaseModel):
     items: list[UsageEventRow]
     total: int
+
+
+class AdminUsageSettingsSummaryResponse(BaseModel):
+    period_days: int
+    total_submissions: int
+    notification_breakdown: list[UsageValueBreakdownRow]
+    supplementary_teams_used: UsageCountPct
+    supplementary_notes_used: UsageCountPct
+    supplementary_any_used: UsageCountPct
+    guard_events: list[UsageGuardEventCountRow]
+    total_guard_events: int
 
 
 class UsageAdminNoteRow(BaseModel):

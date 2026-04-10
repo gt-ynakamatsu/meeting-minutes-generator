@@ -36,8 +36,8 @@ def validate_registry_login_email(s: str) -> None:
         raise ValueError("メールアドレスの形式が正しくありません")
 
 
-# 環境変数未設定・不正時の議事録保持日数（約1か月）。MM_MINUTES_RETENTION_DAYS で上書き可。
-DEFAULT_MINUTES_RETENTION_DAYS = 30
+# 環境変数未設定・不正時の議事録保持日数（約3か月）。MM_MINUTES_RETENTION_DAYS で上書き可。
+DEFAULT_MINUTES_RETENTION_DAYS = 90
 
 
 def minutes_retention_days() -> int:
@@ -49,7 +49,7 @@ def minutes_retention_days() -> int:
         n = int(raw, 10)
     except ValueError:
         return DEFAULT_MINUTES_RETENTION_DAYS
-    # 旧既定 MM_MINUTES_RETENTION_DAYS=183（約半年）の .env が残っている環境を、現行の約1か月に揃える
+    # 旧既定 MM_MINUTES_RETENTION_DAYS=183（約半年）の .env が残っている環境を、現行既定（約3か月）に揃える
     if n == 183:
         return DEFAULT_MINUTES_RETENTION_DAYS
     return n
@@ -184,9 +184,22 @@ def _migrate_usage_tables(conn):
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_job_log_created ON usage_job_log(created_at)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_guard_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            event_type TEXT NOT NULL,
+            actor_key_hash TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_guard_events_created ON usage_guard_events(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_guard_events_type ON usage_guard_events(event_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestion_box_created ON suggestion_box_entries(created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestion_box_status ON suggestion_box_entries(status)")
     _migrate_usage_job_metrics_columns(conn)
+    _migrate_usage_job_feature_columns(conn)
 
 
 def _migrate_usage_job_metrics_columns(conn):
@@ -202,6 +215,20 @@ def _migrate_usage_job_metrics_columns(conn):
         ("extract_llm_sec", "REAL"),
         ("merge_llm_sec", "REAL"),
         ("llm_chunks", "INTEGER"),
+    ]
+    for col, decl in additions:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE usage_job_log ADD COLUMN {col} {decl}")
+
+
+def _migrate_usage_job_feature_columns(conn):
+    """設定利用状況の計測列を追加。"""
+    cur = conn.execute("PRAGMA table_info(usage_job_log)")
+    existing = {row[1] for row in cur.fetchall()}
+    additions = [
+        ("notification_type", "TEXT NOT NULL DEFAULT 'browser'"),
+        ("has_supplementary_teams", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_supplementary_notes", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for col, decl in additions:
         if col not in existing:
@@ -867,6 +894,9 @@ def record_usage_job_submission(
     whisper_preset: str = "accurate",
     original_filename: str = "",
     input_bytes: Optional[int] = None,
+    notification_type: str = "browser",
+    has_supplementary_teams: bool = False,
+    has_supplementary_notes: bool = False,
 ) -> None:
     """認証が有効なときのみ registry に 1 行記録（タスク投入時）。議事録・書き起こし本文は含めない。"""
     if not _auth_secret_configured():
@@ -887,15 +917,45 @@ def record_usage_job_submission(
     wp = (whisper_preset or "accurate").strip() or "accurate"
     mk = usage_media_kind_from_filename(original_filename)
     ib = int(input_bytes) if input_bytes is not None and int(input_bytes) >= 0 else None
+    nt = (notification_type or "browser").strip().lower()
+    if nt not in ("browser", "webhook", "email", "none"):
+        nt = "browser"
+    hs_teams = 1 if has_supplementary_teams else 0
+    hs_notes = 1 if has_supplementary_notes else 0
     try:
         with sqlite3.connect(REGISTRY_DB_PATH) as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO usage_job_log
-                (task_id, user_email, transcript_only, llm_provider, model_name, whisper_preset, media_kind, input_bytes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (
+                    task_id, user_email, transcript_only, llm_provider, model_name, whisper_preset,
+                    media_kind, input_bytes, notification_type, has_supplementary_teams, has_supplementary_notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (tid, user_key, 1 if transcript_only else 0, prov, model, wp, mk, ib),
+                (tid, user_key, 1 if transcript_only else 0, prov, model, wp, mk, ib, nt, hs_teams, hs_notes),
+            )
+    except sqlite3.OperationalError:
+        pass
+
+
+def record_usage_guard_event(event_type: str, actor_key: str = "") -> None:
+    """防御機能の発動イベントを記録（認証・registry 有効時のみ）。"""
+    if not _auth_secret_configured():
+        return
+    et = (event_type or "").strip().lower()
+    if et not in ("rate_limited", "upload_too_large", "disk_low"):
+        return
+    init_registry_db()
+    if not os.path.exists(REGISTRY_DB_PATH):
+        return
+    actor_norm = registry_login_normalize(actor_key) if (actor_key or "").strip() else ""
+    actor_hash = hashlib.sha256(actor_norm.encode("utf-8")).hexdigest()[:16] if actor_norm else ""
+    try:
+        with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO usage_guard_events (event_type, actor_key_hash) VALUES (?, ?)",
+                (et, actor_hash),
             )
     except sqlite3.OperationalError:
         pass
@@ -1171,6 +1231,76 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
                 }
             )
     return items, total
+
+
+def admin_usage_settings_summary(days: int) -> dict[str, Any]:
+    """設定項目の利用傾向と防御イベント件数（直近 days 日）。"""
+    days = max(1, min(365, int(days)))
+    if not _auth_secret_configured() or not os.path.exists(REGISTRY_DB_PATH):
+        return {
+            "period_days": days,
+            "total_submissions": 0,
+            "notification_breakdown": [],
+            "supplementary_teams_used": {"count": 0, "pct": 0.0},
+            "supplementary_notes_used": {"count": 0, "pct": 0.0},
+            "supplementary_any_used": {"count": 0, "pct": 0.0},
+            "guard_events": [],
+            "total_guard_events": 0,
+        }
+    init_registry_db()
+    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_s = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(REGISTRY_DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT notification_type, has_supplementary_teams, has_supplementary_notes
+            FROM usage_job_log
+            WHERE created_at >= ?
+            """,
+            (cutoff_s,),
+        ).fetchall()
+        guard_rows = conn.execute(
+            """
+            SELECT event_type, COUNT(*) as c
+            FROM usage_guard_events
+            WHERE created_at >= ?
+            GROUP BY event_type
+            ORDER BY c DESC, event_type ASC
+            """,
+            (cutoff_s,),
+        ).fetchall()
+
+    total = len(rows)
+    notif_counts: dict[str, int] = {}
+    teams_count = 0
+    notes_count = 0
+    any_supp_count = 0
+    for nt, hs_t, hs_n in rows:
+        k = (nt or "browser").strip().lower() or "browser"
+        notif_counts[k] = notif_counts.get(k, 0) + 1
+        t = bool(hs_t)
+        n = bool(hs_n)
+        if t:
+            teams_count += 1
+        if n:
+            notes_count += 1
+        if t or n:
+            any_supp_count += 1
+    notif_list = sorted(notif_counts.items(), key=lambda x: (-x[1], x[0]))
+    notification_breakdown = [{"value": v, "count": c, "pct": _usage_pct(c, total)} for v, c in notif_list]
+    guard_events = [{"event_type": str(r[0] or ""), "count": int(r[1] or 0)} for r in guard_rows]
+    total_guard_events = sum(x["count"] for x in guard_events)
+
+    return {
+        "period_days": days,
+        "total_submissions": total,
+        "notification_breakdown": notification_breakdown,
+        "supplementary_teams_used": {"count": teams_count, "pct": _usage_pct(teams_count, total)},
+        "supplementary_notes_used": {"count": notes_count, "pct": _usage_pct(notes_count, total)},
+        "supplementary_any_used": {"count": any_supp_count, "pct": _usage_pct(any_supp_count, total)},
+        "guard_events": guard_events,
+        "total_guard_events": total_guard_events,
+    }
 
 
 def usage_admin_notes_list(limit: int = 80) -> list[dict[str, Any]]:

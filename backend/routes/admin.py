@@ -13,6 +13,7 @@ from backend.schemas import (
     AdminPasswordResetRequest,
     AdminRolePatch,
     AdminUsageEventsResponse,
+    AdminUsageSettingsSummaryResponse,
     AdminUsageSummaryResponse,
     AdminUserRow,
     UsageAdminNoteCreate,
@@ -162,6 +163,11 @@ def admin_usage_events(
 ):
     items, total = db.admin_usage_events(days, limit=limit, offset=offset)
     return _usage_events_model(items, total)
+
+
+@router.get("/api/admin/usage/settings-summary", response_model=AdminUsageSettingsSummaryResponse)
+def admin_usage_settings_summary(_admin: AdminUser, days: int = Query(30, ge=1, le=365)):
+    return AdminUsageSettingsSummaryResponse(**db.admin_usage_settings_summary(days))
 
 
 @router.get("/api/admin/usage/notes", response_model=list[UsageAdminNoteRow])

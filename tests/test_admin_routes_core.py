@@ -183,6 +183,24 @@ def test_admin_usage_endpoints(monkeypatch):
     ev = admin.admin_usage_events("admin@example.com", days=7, limit=10, offset=0)
     assert ev.total == 1
 
+    monkeypatch.setattr(
+        admin.db,
+        "admin_usage_settings_summary",
+        lambda _days: {
+            "period_days": 7,
+            "total_submissions": 10,
+            "notification_breakdown": [{"value": "browser", "count": 8, "pct": 80.0}],
+            "supplementary_teams_used": {"count": 3, "pct": 30.0},
+            "supplementary_notes_used": {"count": 4, "pct": 40.0},
+            "supplementary_any_used": {"count": 5, "pct": 50.0},
+            "guard_events": [{"event_type": "rate_limited", "count": 2}],
+            "total_guard_events": 2,
+        },
+    )
+    ss = admin.admin_usage_settings_summary("admin@example.com", days=7)
+    assert ss.total_submissions == 10
+    assert ss.total_guard_events == 2
+
     monkeypatch.setattr(admin.db, "usage_admin_notes_list", lambda: [{"id": 1, "author_email": "a", "body": "b", "created_at": "x"}])
     notes = admin.admin_usage_notes_list("admin@example.com")
     assert len(notes) == 1

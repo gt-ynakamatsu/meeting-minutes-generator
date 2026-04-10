@@ -282,10 +282,23 @@ function formatDbDateTime(value: string | null | undefined): string {
   if (value == null || String(value).trim() === "") return "—";
   const raw = String(value).trim();
   const normalized = raw.includes("T") ? raw : raw.replace(" ", "T");
-  const d = new Date(normalized);
+  // SQLite の CURRENT_TIMESTAMP は UTC（タイムゾーン無し）なので、
+  // タイムゾーン未指定の値は UTC とみなしてローカル時刻へ変換する。
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized);
+  const parseTarget = hasTimezone ? normalized : `${normalized}Z`;
+  const d = new Date(parseTarget);
   if (Number.isNaN(d.getTime())) return raw;
   try {
-    return d.toLocaleString("ja-JP", { dateStyle: "short", timeStyle: "medium" });
+    return d.toLocaleString("ja-JP", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      hourCycle: "h23",
+    });
   } catch {
     return raw;
   }
@@ -2376,7 +2389,7 @@ function UploadDropIcon({ className }: { className?: string }) {
 function archiveRetentionCaption(days: number | undefined): string | null {
   if (days === undefined || Number.isNaN(days)) return null;
   if (days <= 0) return "保持期限による自動削除はオフです。";
-  const period = days === 30 ? "約1か月（30日）" : `約 ${days} 日`;
+  const period = days === 90 ? "約3か月（90日）" : `約 ${days} 日`;
   return `保存期間は${period}です。作成から経過後、自動削除されます（処理待ち・実行中を除く）。`;
 }
 
@@ -3066,7 +3079,9 @@ function AppMain({
           <strong>処理キュー</strong>
           で進捗を確認できます。動画・音声の場合は文字起こしが終わると「書き起こしをダウンロード」から先に .md を保存できます。完了した議事録は画面下の
           <strong>議事録アーカイブ</strong>
-          に並び、このエリア内でスクロールして探せます。画面幅が狭いときは、左パネル → ファイル・キュー → アーカイブの順に上から縦に並びます。
+          に並び、このエリア内でスクロールして探せます。改善案・要望は右上メニューの「設定」内にある
+          <strong>目安箱</strong>
+          から送信できます。画面幅が狭いときは、左パネル → ファイル・キュー → アーカイブの順に上から縦に並びます。
         </p>
       </header>
 
@@ -3390,26 +3405,6 @@ function AppMain({
           ) : null}
 
           <details>
-            <summary>参考資料（Teams・メモ）（任意）</summary>
-            <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0 0.5rem" }}>
-              メインの動画・文字起こしとは別に、Teams のトランスクリプトや手書きメモの .txt / .md / .vtt を渡すと、抽出・統合で固有名の照合や補足に使います（根拠は会話ログ優先）。
-            </p>
-            <label>Teams 等のトランスクリプト</label>
-            <input
-              ref={supTeamsInputRef}
-              type="file"
-              accept=".txt,.md,.vtt,text/plain,text/markdown"
-              onChange={(e) => setSupplementaryTeams(e.target.files?.[0] ?? null)}
-            />
-            <label>担当メモ・.md</label>
-            <input
-              ref={supNotesInputRef}
-              type="file"
-              accept=".txt,.md,.vtt,text/plain,text/markdown"
-              onChange={(e) => setSupplementaryNotes(e.target.files?.[0] ?? null)}
-            />
-          </details>
-          <details>
             <summary>カスタムプロンプト（任意）</summary>
             <label>抽出 .txt</label>
             <input type="file" accept=".txt" onChange={(e) => setPromptExtract(e.target.files?.[0] ?? null)} />
@@ -3427,61 +3422,95 @@ function AppMain({
 
       <main className="main main--stack">
         <div className="main-pane-top">
-          <div
-            className={`main-file-picker main-file-picker--upload${fileDropActive ? " main-file-picker--drop-target" : ""}`}
-            onDragEnter={onTaskFileDragEnter}
-            onDragLeave={onTaskFileDragLeave}
-            onDragOver={onTaskFileDragOver}
-            onDrop={onTaskFileDrop}
-          >
-            <div className="main-file-picker__heading">解析するファイル</div>
-            <label htmlFor="mm-main-file" className="main-file-drop">
-              <input
-                ref={mainFileInputRef}
-                id="mm-main-file"
-                form="mm-task-form"
-                type="file"
-                className="main-file-input-sr"
-                accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              />
-              <UploadDropIcon className="main-file-drop__icon" />
-              <span className="main-file-drop__title">クリックしてファイルを選択</span>
-              <span className="main-file-drop__sub">またはこの枠内にドラッグ＆ドロップ</span>
-              <span className="main-file-drop__formats">対応形式: .mp4 / .mp3 / .m4a / .wav / .txt / .srt</span>
-              {file ? (
-                <span className="main-file-drop__selected">
-                  選択中: <strong>{file.name}</strong>
-                </span>
-              ) : null}
-            </label>
-            <div className="main-file-picker__actions">
-              <button
-                className="btn-primary btn-primary--queue-submit"
-                type="submit"
-                form="mm-task-form"
-                disabled={!canSubmit}
-              >
-                {uploading ? `アップロード中… ${Math.max(0, Math.min(100, uploadPercent))}%` : "解析をキューに追加"}
-              </button>
-            </div>
-            {uploading ? (
-              <div className="upload-progress" role="status" aria-live="polite">
-                <div className="upload-progress__meta">
-                  <span>アップロード進捗</span>
-                  <span>
-                    {formatUsageBytes(uploadLoaded)}
-                    {uploadTotal ? ` / ${formatUsageBytes(uploadTotal)}` : ""}
-                  </span>
-                </div>
-                <progress
-                  className="upload-progress__bar"
-                  max={100}
-                  value={Math.max(0, Math.min(100, uploadPercent))}
+            <div
+              className={`main-file-picker main-file-picker--upload${fileDropActive ? " main-file-picker--drop-target" : ""}`}
+              onDragEnter={onTaskFileDragEnter}
+              onDragLeave={onTaskFileDragLeave}
+              onDragOver={onTaskFileDragOver}
+              onDrop={onTaskFileDrop}
+            >
+              <div className="main-file-picker__heading">解析するファイル</div>
+              <label htmlFor="mm-main-file" className="main-file-drop">
+                <input
+                  ref={mainFileInputRef}
+                  id="mm-main-file"
+                  form="mm-task-form"
+                  type="file"
+                  className="main-file-input-sr"
+                  accept=".mp4,.mp3,.m4a,.wav,.txt,.srt"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
                 />
+                <UploadDropIcon className="main-file-drop__icon" />
+                <span className="main-file-drop__title">クリックしてファイルを選択</span>
+                <span className="main-file-drop__sub">またはこの枠内にドラッグ＆ドロップ</span>
+                <span className="main-file-drop__formats">対応形式: .mp4 / .mp3 / .m4a / .wav / .txt / .srt</span>
+                <span className="main-file-drop__formats">上限サイズ: 5GB（2GB超は事前分割を推奨）</span>
+                {file ? (
+                  <span className="main-file-drop__selected">
+                    選択中: <strong>{file.name}</strong>
+                  </span>
+                ) : null}
+              </label>
+              <div className="main-file-picker__actions">
+                <button
+                  className="btn-primary btn-primary--queue-submit"
+                  type="submit"
+                  form="mm-task-form"
+                  disabled={!canSubmit}
+                >
+                  {uploading ? `アップロード中… ${Math.max(0, Math.min(100, uploadPercent))}%` : "解析をキューに追加"}
+                </button>
               </div>
-            ) : null}
-          </div>
+              {uploading ? (
+                <div className="upload-progress" role="status" aria-live="polite">
+                  <div className="upload-progress__meta">
+                    <span>アップロード進捗</span>
+                    <span>
+                      {formatUsageBytes(uploadLoaded)}
+                      {uploadTotal ? ` / ${formatUsageBytes(uploadTotal)}` : ""}
+                    </span>
+                  </div>
+                  <progress
+                    className="upload-progress__bar"
+                    max={100}
+                    value={Math.max(0, Math.min(100, uploadPercent))}
+                  />
+                </div>
+              ) : null}
+            </div>
+            <section className="main-supplementary-picker" aria-label="参考資料追加">
+              <h2 className="main-subhead">参考資料追加（任意）</h2>
+              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.45rem" }}>
+                Teams のトランスクリプト（.vtt）や担当メモ（.txt / .md）を追加すると、抽出・統合時の固有名照合と文脈補足に使われ、議事録の精度向上が期待できます（根拠は会話ログ優先）。
+              </p>
+              <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.55rem" }}>
+                対応形式: トランスクリプトは <strong>.vtt のみ</strong> / 担当メモは <strong>.txt・.md</strong>
+              </p>
+              <label>Teams 等のトランスクリプト（.vtt のみ）</label>
+              <input
+                ref={supTeamsInputRef}
+                type="file"
+                accept=".vtt,text/vtt"
+                onChange={(e) => setSupplementaryTeams(e.target.files?.[0] ?? null)}
+              />
+              {supplementaryTeams ? (
+                <p className="muted" style={{ fontSize: "0.78rem", marginTop: "0.3rem", wordBreak: "break-all" }}>
+                  選択中: <strong>{supplementaryTeams.name}</strong>
+                </p>
+              ) : null}
+              <label>担当メモ（.txt / .md）</label>
+              <input
+                ref={supNotesInputRef}
+                type="file"
+                accept=".txt,.md,text/plain,text/markdown"
+                onChange={(e) => setSupplementaryNotes(e.target.files?.[0] ?? null)}
+              />
+              {supplementaryNotes ? (
+                <p className="muted" style={{ fontSize: "0.78rem", marginTop: "0.3rem", wordBreak: "break-all" }}>
+                  選択中: <strong>{supplementaryNotes.name}</strong>
+                </p>
+              ) : null}
+            </section>
 
           <section className="main-queue" aria-label="処理キュー">
             <h2 className="main-subhead">処理キュー</h2>

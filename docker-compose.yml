@@ -20,8 +20,8 @@ services:
       - MM_BOOTSTRAP_ADMIN_PASSWORD=${MM_BOOTSTRAP_ADMIN_PASSWORD:-}
       - MM_AUTH_TOKEN_HOURS=${MM_AUTH_TOKEN_HOURS:-168}
       - MM_AUTH_SELF_REGISTER=${MM_AUTH_SELF_REGISTER:-1}
-      # 議事録の自動削除（日）。0 で無効。未指定時は 30（約1か月）。
-      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-30}
+      # 議事録の自動削除（日）。0 で無効。未指定時は 90（約3か月）。
+      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-90}
       # OpenAI / ChatGPT（課金回避で既定オフ。有効にする: MM_OPENAI_ENABLED=1）
       - MM_OPENAI_ENABLED=${MM_OPENAI_ENABLED:-0}
       # モデル一覧 API 用（worker と同じ Ollama ホストを指定）。api を llm-net に参加させること。
@@ -74,7 +74,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - WEBHOOK_URL=${WEBHOOK_URL:-YOUR_WEBHOOK_URL_HERE}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama-server:11434}
-      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-30}
+      - MM_MINUTES_RETENTION_DAYS=${MM_MINUTES_RETENTION_DAYS:-90}
       # VRAM 不足 (CUDA OOM) 時: WHISPER_MODEL=small / WHISPER_COMPUTE_TYPE=int8_float16 など（.env で指定）
       - WHISPER_MODEL=${WHISPER_MODEL:-medium}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}

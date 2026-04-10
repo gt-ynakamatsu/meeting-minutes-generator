@@ -467,6 +467,32 @@ body {
   flex-shrink: 0;
 }
 
+.main-supplementary-picker {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.55rem 0.75rem;
+  margin-bottom: 0;
+}
+
+.main-supplementary-picker label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0.35rem 0 0.2rem;
+  color: var(--muted);
+}
+
+.main-supplementary-picker input[type="file"] {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+}
+
 .filters--tight {
   margin-bottom: 0.35rem;
   gap: 0.45rem;

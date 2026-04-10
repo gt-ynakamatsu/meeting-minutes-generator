@@ -39,11 +39,13 @@ async def _create(**kwargs):
 
 @pytest.mark.anyio
 async def test_supplementary_upload_ok():
-    assert jobs._supplementary_upload_ok("memo.txt") is True
-    assert jobs._supplementary_upload_ok("memo.md") is True
-    assert jobs._supplementary_upload_ok("memo.vtt") is True
-    assert jobs._supplementary_upload_ok("memo.pdf") is False
-    assert jobs._supplementary_upload_ok("") is False
+    assert jobs._supplementary_teams_upload_ok("teams.vtt") is True
+    assert jobs._supplementary_teams_upload_ok("teams.md") is False
+    assert jobs._supplementary_notes_upload_ok("memo.txt") is True
+    assert jobs._supplementary_notes_upload_ok("memo.md") is True
+    assert jobs._supplementary_notes_upload_ok("memo.vtt") is False
+    assert jobs._supplementary_notes_upload_ok("memo.pdf") is False
+    assert jobs._supplementary_notes_upload_ok("") is False
 
 
 @pytest.mark.anyio
@@ -189,8 +191,8 @@ async def test_create_task_success_ollama(monkeypatch, tmp_path):
         file=_upload("sample.wav", b"voice"),
         prompt_extract=_upload("extract.txt", b"pe"),
         prompt_merge=_upload("merge.txt", b"pm"),
-        supplementary_teams=_upload("teams.md", b"st"),
-        supplementary_notes=_upload("notes.vtt", b"sn"),
+        supplementary_teams=_upload("teams.vtt", b"st"),
+        supplementary_notes=_upload("notes.md", b"sn"),
     )
 
     assert res["task_id"] == "tid-001"
@@ -298,3 +300,40 @@ async def test_create_task_success_email_openai_with_saved_key(monkeypatch, tmp_
     assert llm_cfg["provider"] == "openai"
     assert llm_cfg["api_key"] == "sk-saved"
     assert llm_cfg["openai_model"] == "gpt-saved"
+
+
+@pytest.mark.anyio
+async def test_create_task_upload_limit_and_rate_and_capacity(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(jobs.uuid, "uuid4", lambda: "tid-limit")
+    monkeypatch.setattr(jobs, "auth_enabled", lambda: False)
+    monkeypatch.setattr(jobs, "merge_task_prompt_paths", lambda *a, **k: {})
+    monkeypatch.setattr(jobs.db, "save_initial_task", lambda *a, **k: None)
+    monkeypatch.setattr(jobs.celery_app, "send_task", lambda *a, **k: None)
+
+    # 容量不足ガード
+    monkeypatch.setattr(
+        jobs,
+        "_check_upload_capacity_guard",
+        lambda settings=None, actor_key="": (_ for _ in ()).throw(HTTPException(status_code=503, detail="disk low")),
+    )
+    with pytest.raises(HTTPException) as e1:
+        await _create(_auth="", metadata=_meta(), file=_upload("a.wav", b"123"))
+    assert e1.value.status_code == 503
+
+    # 容量OK、レート制限
+    monkeypatch.setattr(jobs, "_check_upload_capacity_guard", lambda settings=None, actor_key="": None)
+    jobs._SUBMIT_RATE_STATE.clear()
+    monkeypatch.setattr(jobs, "_submit_rate_limit_count", lambda: 1)
+    monkeypatch.setattr(jobs, "_submit_rate_limit_window_sec", lambda: 3600)
+    await _create(_auth="", metadata=_meta(), file=_upload("b.wav", b"123"))
+    with pytest.raises(HTTPException) as e2:
+        await _create(_auth="", metadata=_meta(), file=_upload("c.wav", b"123"))
+    assert e2.value.status_code == 429
+
+    # 上限サイズ超過
+    jobs._SUBMIT_RATE_STATE.clear()
+    monkeypatch.setattr(jobs, "_upload_max_bytes", lambda: 2)
+    with pytest.raises(HTTPException) as e3:
+        await _create(_auth="", metadata=_meta(), file=_upload("d.wav", b"123"))
+    assert e3.value.status_code == 413
