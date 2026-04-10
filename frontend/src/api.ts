@@ -44,7 +44,7 @@ export interface TaskSubmitMetadata {
   context: MeetingContext;
   /** true のとき書き起こしまで（Whisper または .txt/.srt）。議事録用 LLM は使わない */
   transcript_only?: boolean;
-  /** 動画・音声の Whisper 文字起こしの探索の強さ（既定 balanced） */
+  /** 動画・音声の Whisper 文字起こしの探索の強さ（既定 accurate） */
   whisper_preset?: "fast" | "balanced" | "accurate";
 }
 
@@ -70,6 +70,10 @@ export interface RecordRow {
   transcript_only?: number | boolean;
   /** /api/queue のみ。transcript があり、かつ Whisper 実行中（processing:transcribing）でない */
   transcript_ready?: boolean;
+  /** 認証あり: ジョブ所有者のログイン ID（メール）。レガシー共有 DB は null */
+  job_owner?: string | null;
+  /** 認証あり: 現在のユーザーが投入したジョブか（他人のジョブは破棄・DL 不可） */
+  is_mine?: boolean;
 }
 
 export interface AuthStatus {
@@ -181,6 +185,69 @@ async function handle<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function postJson<T>(path: string, body: unknown, method: "POST" | "PATCH" = "POST"): Promise<T> {
+  const res = await apiFetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handle(res);
+}
+
+function parseXhrHeaders(raw: string): Headers {
+  const h = new Headers();
+  for (const line of raw.split(/\r?\n/)) {
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    const k = line.slice(0, idx).trim();
+    const v = line.slice(idx + 1).trim();
+    if (k) h.append(k, v);
+  }
+  return h;
+}
+
+async function postFormDataWithUploadProgress(
+  path: string,
+  fd: FormData,
+  onUploadProgress?: (loaded: number, total: number | null, percent: number) => void,
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const t = getStoredToken();
+    xhr.open("POST", path, true);
+    if (t) xhr.setRequestHeader("Authorization", `Bearer ${t}`);
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (ev) => {
+        const loaded = Number(ev.loaded) || 0;
+        const total = ev.lengthComputable && Number.isFinite(ev.total) ? Number(ev.total) : null;
+        const percent = total && total > 0 ? Math.min(100, Math.max(0, Math.floor((loaded / total) * 100))) : 0;
+        onUploadProgress(loaded, total, percent);
+      };
+    }
+    xhr.onerror = () => reject(new Error("アップロード中にネットワークエラーが発生しました。"));
+    xhr.onabort = () => reject(new Error("アップロードが中断されました。"));
+    xhr.onload = () => {
+      if (xhr.status === 401 && t) {
+        setStoredToken(null);
+        window.dispatchEvent(new Event("mm-auth-lost"));
+      }
+      if (!(xhr.status >= 100 && xhr.status <= 599)) {
+        reject(new Error("アップロードの応答を取得できませんでした。"));
+        return;
+      }
+      const headers = parseXhrHeaders(xhr.getAllResponseHeaders() || "");
+      resolve(
+        new Response(xhr.responseText ?? "", {
+          status: xhr.status,
+          statusText: xhr.statusText || "",
+          headers,
+        }),
+      );
+    };
+    xhr.send(fd);
+  });
+}
+
 export async function getAuthStatus(): Promise<AuthStatus> {
   const res = await fetch(`${PREFIX}/api/auth/status`);
   return handle(res);
@@ -192,12 +259,16 @@ export async function submitErrorReport(body: {
   page_url?: string;
   client_version?: string;
 }): Promise<{ ok: boolean; sent_to_count?: number }> {
-  const res = await apiFetch(`${PREFIX}/api/feedback/error-report`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return handle(res);
+  return postJson(`${PREFIX}/api/feedback/error-report`, body, "POST");
+}
+
+export async function submitSuggestionBox(body: {
+  subject?: string;
+  body: string;
+  page_url?: string;
+  client_version?: string;
+}): Promise<{ ok: boolean; id: number; webhook_notified?: boolean }> {
+  return postJson(`${PREFIX}/api/feedback/suggestion-box`, body, "POST");
 }
 
 /** Ollama のローカルタグ一覧（API が OLLAMA_BASE_URL の /api/tags を中継） */
@@ -296,6 +367,24 @@ export async function adminDeleteUser(loginEmail: string): Promise<{ ok: boolean
 
 export type UsageCountPct = { count: number; pct: number };
 
+export type UsageMetricsRollup = {
+  jobs_with_metrics: number;
+  sum_input_bytes: number;
+  avg_input_bytes: number;
+  sum_media_duration_sec: number;
+  avg_media_duration_sec: number;
+  sum_audio_extract_sec: number;
+  avg_audio_extract_sec: number;
+  sum_whisper_sec: number;
+  avg_whisper_sec: number;
+  sum_transcript_chars: number;
+  avg_transcript_chars: number;
+  sum_extract_llm_sec: number;
+  sum_merge_llm_sec: number;
+  sum_llm_sec: number;
+  sum_llm_chunks: number;
+};
+
 export type AdminUsageSummary = {
   period_days: number;
   total_submissions: number;
@@ -307,6 +396,7 @@ export type AdminUsageSummary = {
   openai_models_for_llm_jobs: { model: string; count: number; pct: number }[];
   whisper_presets_for_media: { preset: string; count: number; pct: number }[];
   media_kind_breakdown: { kind: string; count: number; pct: number }[];
+  metrics_rollup: UsageMetricsRollup;
 };
 
 export type UsageEventRow = {
@@ -319,6 +409,14 @@ export type UsageEventRow = {
   model_name: string;
   whisper_preset: string;
   media_kind: string;
+  input_bytes?: number | null;
+  media_duration_sec?: number | null;
+  audio_extract_wall_sec?: number | null;
+  whisper_wall_sec?: number | null;
+  transcript_chars?: number | null;
+  extract_llm_sec?: number | null;
+  merge_llm_sec?: number | null;
+  llm_chunks?: number | null;
 };
 
 export type UsageAdminNoteRow = {
@@ -326,6 +424,19 @@ export type UsageAdminNoteRow = {
   created_at: string;
   author_email: string;
   body: string;
+};
+
+export type SuggestionBoxRow = {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  author_email: string;
+  subject: string;
+  body: string;
+  page_url: string;
+  client_version: string;
+  status: "new" | "in_progress" | "done";
+  admin_note: string;
 };
 
 export async function adminUsageSummary(days: number): Promise<AdminUsageSummary> {
@@ -365,6 +476,27 @@ export async function adminUsageNoteDelete(noteId: number): Promise<{ ok: boolea
   return handle(res);
 }
 
+export async function adminSuggestionBoxList(params?: {
+  status?: "" | "new" | "in_progress" | "done";
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: SuggestionBoxRow[]; total: number }> {
+  const q = new URLSearchParams();
+  if (params?.status) q.set("status", params.status);
+  if (params?.limit != null) q.set("limit", String(params.limit));
+  if (params?.offset != null) q.set("offset", String(params.offset));
+  const qs = q.toString();
+  const res = await apiFetch(`${PREFIX}/api/admin/suggestion-box${qs ? `?${qs}` : ""}`);
+  return handle(res);
+}
+
+export async function adminSuggestionBoxPatch(
+  ticketId: number,
+  body: { status?: "new" | "in_progress" | "done"; admin_note?: string },
+): Promise<SuggestionBoxRow> {
+  return postJson(`${PREFIX}/api/admin/suggestion-box/${ticketId}`, body, "PATCH");
+}
+
 export async function getVersion(): Promise<{ version: string }> {
   const res = await fetch(`${PREFIX}/api/version`);
   return handle(res);
@@ -375,8 +507,11 @@ export async function getPresets(): Promise<Record<string, { label: string }>> {
   return handle(res);
 }
 
-export async function createTask(fd: FormData): Promise<{ task_id: string; filename: string }> {
-  const res = await apiFetch(`${PREFIX}/api/tasks`, { method: "POST", body: fd });
+export async function createTask(
+  fd: FormData,
+  options?: { onUploadProgress?: (loaded: number, total: number | null, percent: number) => void },
+): Promise<{ task_id: string; filename: string }> {
+  const res = await postFormDataWithUploadProgress(`${PREFIX}/api/tasks`, fd, options?.onUploadProgress);
   return handle(res);
 }
 

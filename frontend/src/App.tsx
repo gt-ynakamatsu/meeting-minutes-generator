@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -6,6 +6,8 @@ import {
   adminCreateUser,
   adminDeleteUser,
   adminListUsers,
+  adminSuggestionBoxList,
+  adminSuggestionBoxPatch,
   adminResetPassword,
   adminSetRole,
   adminUsageEvents,
@@ -35,11 +37,13 @@ import {
   patchSummary,
   setStoredToken,
   submitErrorReport,
+  submitSuggestionBox,
   type AdminUsageSummary,
   type AdminUserRow,
   type AuthMe,
   type AuthStatus,
   type RecordRow,
+  type SuggestionBoxRow,
   type TaskSubmitMetadata,
   type UsageAdminNoteRow,
   type UsageEventRow,
@@ -979,32 +983,74 @@ function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
     load();
   }, [load]);
 
+  function AdminUserHeaderCell({
+    children,
+    alignRight = false,
+    noSidePadding = false,
+  }: {
+    children: ReactNode;
+    alignRight?: boolean;
+    noSidePadding?: boolean;
+  }) {
+    return (
+      <th style={{ textAlign: alignRight ? "right" : "left", padding: noSidePadding ? "0.5rem 0" : "0.5rem" }}>
+        {children}
+      </th>
+    );
+  }
+
+  function AdminUserCell({
+    children,
+    alignRight = false,
+    noSidePadding = false,
+    nowrap = false,
+  }: {
+    children: ReactNode;
+    alignRight?: boolean;
+    noSidePadding?: boolean;
+    nowrap?: boolean;
+  }) {
+    return (
+      <td
+        style={{
+          padding: noSidePadding ? "0.5rem 0" : "0.5rem",
+          textAlign: alignRight ? "right" : "left",
+          whiteSpace: nowrap ? "nowrap" : undefined,
+        }}
+      >
+        {children}
+      </td>
+    );
+  }
+
   return (
     <>
       <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
         ユーザーの登録・削除、パスワード再設定、管理者権限の付与・解除ができます。最後の管理者は削除・権限解除できません。
       </p>
       {msg ? <p className="muted">{msg}</p> : null}
-      {err ? <p className="error-box">{err}</p> : null}
+      <ErrorMessage message={err} />
 
-      <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                <th style={{ textAlign: "left", padding: "0.5rem 0" }}>メールアドレス</th>
-                <th style={{ textAlign: "left", padding: "0.5rem" }}>管理者権限</th>
-                <th style={{ textAlign: "right", padding: "0.5rem 0" }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.email} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                  <td style={{ padding: "0.5rem 0" }}>
-                    <code>{r.email}</code>
-                    {r.email === selfEmail ? <span className="muted"> （あなた）</span> : null}
-                  </td>
-                  <td style={{ padding: "0.5rem" }}>{r.is_admin ? "はい" : "—"}</td>
-                  <td style={{ padding: "0.5rem 0", textAlign: "right", whiteSpace: "nowrap" }}>
+      <TableScroll>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+              <AdminUserHeaderCell noSidePadding>メールアドレス</AdminUserHeaderCell>
+              <AdminUserHeaderCell>管理者権限</AdminUserHeaderCell>
+              <AdminUserHeaderCell noSidePadding alignRight>
+                操作
+              </AdminUserHeaderCell>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.email} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+                <AdminUserCell noSidePadding>
+                  <code>{r.email}</code>
+                  {r.email === selfEmail ? <span className="muted"> （あなた）</span> : null}
+                </AdminUserCell>
+                <AdminUserCell>{r.is_admin ? "はい" : "—"}</AdminUserCell>
+                <AdminUserCell noSidePadding alignRight nowrap>
                     {editingPw === r.email ? (
                       <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center", justifyContent: "flex-end" }}>
                         <input
@@ -1094,12 +1140,12 @@ function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
                         </button>
                       </>
                     )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                </AdminUserCell>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
 
       <h3 style={{ marginTop: "1.5rem" }}>ユーザーを追加</h3>
       <div className="auth-form" style={{ maxWidth: "100%" }}>
@@ -1140,6 +1186,294 @@ function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
 }
 
 const USAGE_EVENT_PAGE = 50;
+
+function formatUsageBytes(n: number | null | undefined): string {
+  if (n == null || n < 0 || !Number.isFinite(n)) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+}
+
+function formatUsageSeconds(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s)) return "—";
+  if (s < 60) return `${s.toFixed(1)}秒`;
+  const m = Math.floor(s / 60);
+  const sec = s - m * 60;
+  if (m < 60) return `${m}分${sec < 10 ? "0" : ""}${sec.toFixed(0)}秒`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}時間${mm}分`;
+}
+
+function formatUsageInt(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return String(Math.round(n));
+}
+
+/** 表のセル用（短い秒表示） */
+function formatUsageSecShort(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s)) return "—";
+  return `${s.toFixed(1)}秒`;
+}
+
+function CommonCell({
+  children,
+  alignRight = false,
+  nowrap = false,
+  minWidth,
+  preWrap = false,
+}: {
+  children: ReactNode;
+  alignRight?: boolean;
+  nowrap?: boolean;
+  minWidth?: number;
+  preWrap?: boolean;
+}) {
+  return (
+    <td
+      style={{
+        padding: "0.35rem 0.25rem",
+        textAlign: alignRight ? "right" : "left",
+        whiteSpace: preWrap ? "pre-wrap" : nowrap ? "nowrap" : undefined,
+        minWidth,
+      }}
+    >
+      {children}
+    </td>
+  );
+}
+
+function UsageMetricCell({ children, alignRight = false }: { children: ReactNode; alignRight?: boolean }) {
+  return <CommonCell alignRight={alignRight}>{children}</CommonCell>;
+}
+
+function UsageMetricRow({
+  label,
+  sum,
+  avg,
+}: {
+  label: string;
+  sum: string;
+  avg?: string;
+}) {
+  return (
+    <tr style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+      <UsageMetricCell>{label}</UsageMetricCell>
+      <UsageMetricCell alignRight>{sum}</UsageMetricCell>
+      {avg == null ? (
+        <UsageMetricCell alignRight>—</UsageMetricCell>
+      ) : (
+        <UsageMetricCell alignRight>{avg}</UsageMetricCell>
+      )}
+    </tr>
+  );
+}
+
+function UsageMetricRowSpan({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <tr style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+      <UsageMetricCell>{label}</UsageMetricCell>
+      <td style={{ textAlign: "right", padding: "0.35rem 0.25rem" }} colSpan={2}>
+        {value}
+      </td>
+    </tr>
+  );
+}
+
+function TableHeaderCell({
+  children,
+  alignRight = false,
+  compact = false,
+}: {
+  children: ReactNode;
+  alignRight?: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <th
+      style={{
+        textAlign: alignRight ? "right" : "left",
+        padding: compact ? "0.35rem 0" : "0.35rem 0.25rem",
+      }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function TableScroll({ children }: { children: ReactNode }) {
+  return <div style={{ overflowX: "auto" }}>{children}</div>;
+}
+
+function CountPctCell({
+  children,
+  alignRight = false,
+}: {
+  children: ReactNode;
+  alignRight?: boolean;
+}) {
+  return (
+    <td style={{ textAlign: alignRight ? "right" : "left", padding: "0.35rem 0" }}>
+      {children}
+    </td>
+  );
+}
+
+function CountPctTable({
+  headerLabel,
+  rows,
+  codeLabel = false,
+}: {
+  headerLabel: string;
+  rows: Array<{ key: string; label: string; count: number; pct: number }>;
+  codeLabel?: boolean;
+}) {
+  return (
+    <TableScroll>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+            <TableHeaderCell compact>{headerLabel}</TableHeaderCell>
+            <TableHeaderCell compact alignRight>
+              件数
+            </TableHeaderCell>
+            <TableHeaderCell compact alignRight>
+              割合
+            </TableHeaderCell>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
+              <CountPctCell>{codeLabel ? <code>{r.label}</code> : r.label}</CountPctCell>
+              <CountPctCell alignRight>{r.count}</CountPctCell>
+              <CountPctCell alignRight>{r.pct}%</CountPctCell>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
+  );
+}
+
+function UsageEventCell({
+  children,
+  alignRight = false,
+  nowrap = false,
+}: {
+  children: ReactNode;
+  alignRight?: boolean;
+  nowrap?: boolean;
+}) {
+  return <CommonCell alignRight={alignRight} nowrap={nowrap}>{children}</CommonCell>;
+}
+
+function UsageEventMetricCell({ value }: { value: string }) {
+  return (
+    <UsageEventCell alignRight nowrap>
+      {value}
+    </UsageEventCell>
+  );
+}
+
+function InlineHint({ children }: { children: ReactNode }) {
+  return (
+    <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+      {children}
+    </p>
+  );
+}
+
+function ErrorMessage({ message }: { message: string | null }) {
+  if (!message) return null;
+  return <p className="error-box">{message}</p>;
+}
+
+function AdminSection({
+  title,
+  hint,
+  children,
+  style,
+}: {
+  title: ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <section style={style}>
+      <h3 style={{ margin: "0 0 0.5rem" }}>{title}</h3>
+      {hint ? <InlineHint>{hint}</InlineHint> : null}
+      {children}
+    </section>
+  );
+}
+
+function PaginatedListFooter({
+  loaded,
+  total,
+  onLoadMore,
+  allLoadedText,
+  emptyText,
+}: {
+  loaded: number;
+  total: number;
+  onLoadMore: () => void;
+  allLoadedText?: string;
+  emptyText?: string;
+}) {
+  if (loaded < total) {
+    return (
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ marginTop: "0.5rem" }}
+        onClick={onLoadMore}
+      >
+        さらに読む（{loaded} / {total}）
+      </button>
+    );
+  }
+  if (loaded > 0 && allLoadedText) {
+    return (
+      <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
+        {allLoadedText}
+      </p>
+    );
+  }
+  if (loaded === 0 && emptyText) {
+    return (
+      <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
+        {emptyText}
+      </p>
+    );
+  }
+  return null;
+}
+
+function SuggestionCell({
+  children,
+  nowrap = false,
+  minWidth,
+  preWrap = false,
+}: {
+  children: ReactNode;
+  nowrap?: boolean;
+  minWidth?: number;
+  preWrap?: boolean;
+}) {
+  return (
+    <CommonCell nowrap={nowrap} minWidth={minWidth} preWrap={preWrap}>
+      {children}
+    </CommonCell>
+  );
+}
 
 function AdminUsagePanel() {
   const [days, setDays] = useState(30);
@@ -1202,9 +1536,10 @@ function AdminUsagePanel() {
     <>
       <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
         認証が有効な環境で、ジョブがキューに載ったタイミングの統計です。議事録本文・書き起こし全文・ファイル名の保存は行いません（拡張子から推定した媒体種別のみ）。
+        完了ジョブについては入力サイズ・媒体の長さ・Whisper／LLM の処理時間などを参照できます（サーバ強化・稟議の根拠用）。
         集計期間の上限は <strong>365 日（1 年）</strong>です。経営・インフラ判断向けに、下のメモに所見を残せます。
       </p>
-      {err ? <p className="error-box">{err}</p> : null}
+      <ErrorMessage message={err} />
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center", marginBottom: "1rem" }}>
         <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
@@ -1235,8 +1570,7 @@ function AdminUsagePanel() {
 
       {summary ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-          <section>
-            <h3 style={{ margin: "0 0 0.5rem" }}>サマリ</h3>
+          <AdminSection title="サマリ">
             <p style={{ margin: "0 0 0.5rem" }}>
               <strong>総投入件数:</strong> {summary.total_submissions} 件（期間 {summary.period_days} 日）
             </p>
@@ -1253,190 +1587,212 @@ function AdminUsagePanel() {
                 {summary.provider_openai.count} 件（{summary.provider_openai.pct}%）
               </li>
             </ul>
-          </section>
+          </AdminSection>
 
-          {summary.ollama_models_for_llm_jobs.length > 0 ? (
-            <section>
-              <h3 style={{ margin: "0 0 0.5rem" }}>Ollama モデル（議事録生成ジョブのみ）</h3>
-              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
-                割合は、Ollama で議事録生成まで行ったジョブ件数に対する内訳です。
-              </p>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+          <AdminSection
+            title="負荷・容量の目安（メトリクス記録済みの完了ジョブ）"
+            hint="書き起こし文字数が記録されたジョブのみ集計（投入時点のファイルサイズ、完了時の処理時間・文字数）。未完了・失敗は含みません。"
+          >
+            {summary.metrics_rollup.jobs_with_metrics > 0 ? (
+              <TableScroll>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.88rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>モデル</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
+                      <TableHeaderCell>項目</TableHeaderCell>
+                      <TableHeaderCell alignRight>合計</TableHeaderCell>
+                      <TableHeaderCell alignRight>平均（1ジョブ）</TableHeaderCell>
                     </tr>
                   </thead>
                   <tbody>
-                    {summary.ollama_models_for_llm_jobs.map((r) => (
-                      <tr key={r.model} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                        <td style={{ padding: "0.35rem 0" }}>
-                          <code>{r.model}</code>
-                        </td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
-                      </tr>
-                    ))}
+                    <UsageMetricRowSpan label="対象ジョブ数" value={`${summary.metrics_rollup.jobs_with_metrics} 件`} />
+                    <UsageMetricRow
+                      label="入力ファイルサイズ"
+                      sum={formatUsageBytes(summary.metrics_rollup.sum_input_bytes)}
+                      avg={formatUsageBytes(summary.metrics_rollup.avg_input_bytes)}
+                    />
+                    <UsageMetricRow
+                      label="媒体の長さ（動画・音声の再生相当）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_media_duration_sec)}
+                      avg={formatUsageSeconds(summary.metrics_rollup.avg_media_duration_sec)}
+                    />
+                    <UsageMetricRow
+                      label="音声抽出（壁時計）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_audio_extract_sec)}
+                      avg={formatUsageSeconds(summary.metrics_rollup.avg_audio_extract_sec)}
+                    />
+                    <UsageMetricRow
+                      label="Whisper（壁時計）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_whisper_sec)}
+                      avg={formatUsageSeconds(summary.metrics_rollup.avg_whisper_sec)}
+                    />
+                    <UsageMetricRow
+                      label="書き起こし文字数"
+                      sum={`${summary.metrics_rollup.sum_transcript_chars.toLocaleString()} 字`}
+                      avg={`${summary.metrics_rollup.avg_transcript_chars.toFixed(0)} 字`}
+                    />
+                    <UsageMetricRow
+                      label="議事録 LLM（チャンク抽出・壁時計）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_extract_llm_sec)}
+                    />
+                    <UsageMetricRow
+                      label="議事録 LLM（結合・壁時計）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_merge_llm_sec)}
+                    />
+                    <UsageMetricRow
+                      label="議事録 LLM 合計（抽出＋結合）"
+                      sum={formatUsageSeconds(summary.metrics_rollup.sum_llm_sec)}
+                    />
+                    <UsageMetricRowSpan
+                      label="LLM チャンク処理回数（合計）"
+                      value={`${summary.metrics_rollup.sum_llm_chunks.toLocaleString()} 回`}
+                    />
                   </tbody>
                 </table>
-              </div>
-            </section>
+              </TableScroll>
+            ) : (
+              <p className="muted" style={{ fontSize: "0.88rem", margin: 0 }}>
+                この期間にメトリクスが揃った完了ジョブはまだありません（新規データはワーカー更新後から蓄積されます）。
+              </p>
+            )}
+          </AdminSection>
+
+          {summary.ollama_models_for_llm_jobs.length > 0 ? (
+            <AdminSection
+              title="Ollama モデル（議事録生成ジョブのみ）"
+              hint="割合は、Ollama で議事録生成まで行ったジョブ件数に対する内訳です。"
+            >
+              <CountPctTable
+                headerLabel="モデル"
+                codeLabel
+                rows={summary.ollama_models_for_llm_jobs.map((r) => ({
+                  key: r.model,
+                  label: r.model,
+                  count: r.count,
+                  pct: r.pct,
+                }))}
+              />
+            </AdminSection>
           ) : null}
 
           {summary.openai_models_for_llm_jobs.length > 0 ? (
-            <section>
-              <h3 style={{ margin: "0 0 0.5rem" }}>OpenAI モデル（議事録生成ジョブのみ）</h3>
-              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
-                割合は、OpenAI で議事録生成まで行ったジョブ件数に対する内訳です。
-              </p>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>モデル</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.openai_models_for_llm_jobs.map((r) => (
-                      <tr key={r.model} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                        <td style={{ padding: "0.35rem 0" }}>
-                          <code>{r.model}</code>
-                        </td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+            <AdminSection
+              title="OpenAI モデル（議事録生成ジョブのみ）"
+              hint="割合は、OpenAI で議事録生成まで行ったジョブ件数に対する内訳です。"
+            >
+              <CountPctTable
+                headerLabel="モデル"
+                codeLabel
+                rows={summary.openai_models_for_llm_jobs.map((r) => ({
+                  key: r.model,
+                  label: r.model,
+                  count: r.count,
+                  pct: r.pct,
+                }))}
+              />
+            </AdminSection>
           ) : null}
 
           {summary.whisper_presets_for_media.length > 0 ? (
-            <section>
-              <h3 style={{ margin: "0 0 0.5rem" }}>Whisper 品質プリセット（動画・音声ジョブのみ）</h3>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>プリセット</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.whisper_presets_for_media.map((r) => (
-                      <tr key={r.preset} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                        <td style={{ padding: "0.35rem 0" }}>{r.preset}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+            <AdminSection title="Whisper 品質プリセット（動画・音声ジョブのみ）">
+              <CountPctTable
+                headerLabel="プリセット"
+                rows={summary.whisper_presets_for_media.map((r) => ({
+                  key: r.preset,
+                  label: r.preset,
+                  count: r.count,
+                  pct: r.pct,
+                }))}
+              />
+            </AdminSection>
           ) : null}
 
           {summary.media_kind_breakdown.length > 0 ? (
-            <section>
-              <h3 style={{ margin: "0 0 0.5rem" }}>投入ファイルの種別（拡張子から推定）</h3>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                      <th style={{ textAlign: "left", padding: "0.35rem 0" }}>種別</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>件数</th>
-                      <th style={{ textAlign: "right", padding: "0.35rem 0" }}>割合</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.media_kind_breakdown.map((r) => (
-                      <tr key={r.kind} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                        <td style={{ padding: "0.35rem 0" }}>{mediaKindLabel(r.kind)}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.count}</td>
-                        <td style={{ textAlign: "right", padding: "0.35rem 0" }}>{r.pct}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+            <AdminSection title="投入ファイルの種別（拡張子から推定）">
+              <CountPctTable
+                headerLabel="種別"
+                rows={summary.media_kind_breakdown.map((r) => ({
+                  key: r.kind,
+                  label: mediaKindLabel(r.kind),
+                  count: r.count,
+                  pct: r.pct,
+                }))}
+              />
+            </AdminSection>
           ) : null}
         </div>
       ) : (
         <p className="muted">読み込み中…</p>
       )}
 
-      <section style={{ marginTop: "1.75rem" }}>
-        <h3 style={{ margin: "0 0 0.5rem" }}>直近の投入イベント</h3>
-        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
-          タスク ID・ログイン ID（メール）・設定の要約のみ。本文は含みません。
-        </p>
-        <div style={{ overflowX: "auto" }}>
+      <AdminSection
+        title="直近の投入イベント"
+        hint="タスク ID・ログイン ID（メール）・設定の要約と、完了後に記録されたメトリクス。本文は含みません。"
+        style={{ marginTop: "1.75rem" }}
+      >
+        <TableScroll>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>日時</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>ユーザー</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>パイプライン</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>LLM</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>モデル</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>媒体</th>
-                <th style={{ textAlign: "left", padding: "0.35rem 0.25rem" }}>Whisper</th>
+                <TableHeaderCell>日時</TableHeaderCell>
+                <TableHeaderCell>ユーザー</TableHeaderCell>
+                <TableHeaderCell>パイプライン</TableHeaderCell>
+                <TableHeaderCell>LLM</TableHeaderCell>
+                <TableHeaderCell>モデル</TableHeaderCell>
+                <TableHeaderCell>媒体</TableHeaderCell>
+                <TableHeaderCell>Whisper</TableHeaderCell>
+                <TableHeaderCell alignRight>入力</TableHeaderCell>
+                <TableHeaderCell alignRight>尺</TableHeaderCell>
+                <TableHeaderCell alignRight>抽出</TableHeaderCell>
+                <TableHeaderCell alignRight>Whisper時</TableHeaderCell>
+                <TableHeaderCell alignRight>文字</TableHeaderCell>
+                <TableHeaderCell alignRight>LLM抽出</TableHeaderCell>
+                <TableHeaderCell alignRight>LLM結合</TableHeaderCell>
+                <TableHeaderCell alignRight>チャンク</TableHeaderCell>
               </tr>
             </thead>
             <tbody>
               {events.map((ev) => (
                 <tr key={`${ev.id}-${ev.task_id}`} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
-                  <td style={{ padding: "0.35rem 0.25rem", whiteSpace: "nowrap" }}>{ev.created_at}</td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>
+                  <UsageEventCell nowrap>{ev.created_at}</UsageEventCell>
+                  <UsageEventCell>
                     <code>{ev.user_email || "—"}</code>
-                  </td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.transcript_only ? "書き起こしのみ" : "議事録まで"}</td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.llm_provider}</td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>
+                  </UsageEventCell>
+                  <UsageEventCell>{ev.transcript_only ? "書き起こしのみ" : "議事録まで"}</UsageEventCell>
+                  <UsageEventCell>{ev.llm_provider}</UsageEventCell>
+                  <UsageEventCell>
                     <code>{ev.model_name || "—"}</code>
-                  </td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>{mediaKindLabel(ev.media_kind)}</td>
-                  <td style={{ padding: "0.35rem 0.25rem" }}>{ev.whisper_preset || "—"}</td>
+                  </UsageEventCell>
+                  <UsageEventCell>{mediaKindLabel(ev.media_kind)}</UsageEventCell>
+                  <UsageEventCell>{ev.whisper_preset || "—"}</UsageEventCell>
+                  <UsageEventMetricCell value={formatUsageBytes(ev.input_bytes ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.media_duration_sec ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.audio_extract_wall_sec ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.whisper_wall_sec ?? undefined)} />
+                  <UsageEventMetricCell value={ev.transcript_chars != null ? ev.transcript_chars.toLocaleString() : "—"} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.extract_llm_sec ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.merge_llm_sec ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageInt(ev.llm_chunks ?? undefined)} />
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-        {events.length < eventsTotal ? (
-          <button
-            type="button"
-            className="btn-secondary"
-            style={{ marginTop: "0.5rem" }}
-            onClick={() => {
-              void loadEvents(events.length, true);
-            }}
-          >
-            さらに読む（{events.length} / {eventsTotal}）
-          </button>
-        ) : events.length > 0 ? (
-          <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
-            全 {eventsTotal} 件を表示しています。
-          </p>
-        ) : (
-          <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.5rem" }}>
-            この期間のログはまだありません。
-          </p>
-        )}
-      </section>
+        </TableScroll>
+        <PaginatedListFooter
+          loaded={events.length}
+          total={eventsTotal}
+          onLoadMore={() => {
+            void loadEvents(events.length, true);
+          }}
+          allLoadedText={`全 ${eventsTotal} 件を表示しています。`}
+          emptyText="この期間のログはまだありません。"
+        />
+      </AdminSection>
 
-      <section style={{ marginTop: "1.75rem" }}>
-        <h3 style={{ margin: "0 0 0.5rem" }}>運用メモ（経営・サーバ強化の根拠など）</h3>
-        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
-          管理者のみが閲覧・追記できます。時系列で残ります。
-        </p>
+      <AdminSection
+        title="運用メモ（経営・サーバ強化の根拠など）"
+        hint="管理者のみが閲覧・追記できます。時系列で残ります。"
+        style={{ marginTop: "1.75rem" }}
+      >
         <textarea
           value={noteDraft}
           onChange={(e) => setNoteDraft(e.target.value)}
@@ -1502,8 +1858,207 @@ function AdminUsagePanel() {
             </li>
           ))}
         </ul>
-      </section>
+      </AdminSection>
     </>
+  );
+}
+
+const SUGGESTION_BOX_PAGE = 40;
+const SUGGESTION_STATUSES = ["new", "in_progress", "done"] as const;
+
+function AdminSuggestionBoxPanel() {
+  const [statusFilter, setStatusFilter] = useState<"" | "new" | "in_progress" | "done">("");
+  const [rows, setRows] = useState<SuggestionBoxRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, { status: "new" | "in_progress" | "done"; admin_note: string }>>({});
+
+  const ensureDraft = useCallback((r: SuggestionBoxRow) => {
+    setDrafts((prev) => {
+      if (prev[r.id]) return prev;
+      return { ...prev, [r.id]: { status: r.status, admin_note: r.admin_note || "" } };
+    });
+  }, []);
+
+  const load = useCallback(
+    async (offset: number, append: boolean) => {
+      setErr(null);
+      const res = await adminSuggestionBoxList({ status: statusFilter, limit: SUGGESTION_BOX_PAGE, offset });
+      setTotal(res.total);
+      if (append) setRows((prev) => [...prev, ...res.items]);
+      else setRows(res.items);
+      for (const r of res.items) ensureDraft(r);
+    },
+    [ensureDraft, statusFilter],
+  );
+
+  useEffect(() => {
+    void load(0, false).catch((e) => setErr(String(e)));
+  }, [load]);
+
+  const saveRow = useCallback(
+    async (rowId: number) => {
+      const d = drafts[rowId];
+      if (!d) return;
+      setBusy(true);
+      setErr(null);
+      try {
+        const updated = await adminSuggestionBoxPatch(rowId, { status: d.status, admin_note: d.admin_note });
+        setRows((prev) => prev.map((r) => (r.id === rowId ? updated : r)));
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [drafts],
+  );
+
+  const updateDraft = useCallback(
+    (rowId: number, patch: Partial<{ status: "new" | "in_progress" | "done"; admin_note: string }>) => {
+      setDrafts((prev) => {
+        const current = prev[rowId];
+        if (!current) return prev;
+        return { ...prev, [rowId]: { ...current, ...patch } };
+      });
+    },
+    [],
+  );
+
+  return (
+    <AdminSection
+      title="目安箱（管理者対応）"
+      hint="利用者からの目安箱投稿です。ステータスと対応メモを更新できます。"
+      style={{ marginTop: "1.75rem" }}
+    >
+      <ErrorMessage message={err} />
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.6rem" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          状態
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter((e.target.value as "" | "new" | "in_progress" | "done") || "");
+              e.currentTarget.blur();
+            }}
+          >
+            <option value="">すべて</option>
+            {SUGGESTION_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => {
+            void load(0, false).catch((e) => setErr(String(e)));
+          }}
+        >
+          再読み込み
+        </button>
+      </div>
+      <TableScroll>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.86rem" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
+              <TableHeaderCell>日時</TableHeaderCell>
+              <TableHeaderCell>投稿者</TableHeaderCell>
+              <TableHeaderCell>件名</TableHeaderCell>
+              <TableHeaderCell>内容</TableHeaderCell>
+              <TableHeaderCell>状態</TableHeaderCell>
+              <TableHeaderCell>対応メモ</TableHeaderCell>
+              <TableHeaderCell>操作</TableHeaderCell>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const d = drafts[r.id] ?? { status: r.status, admin_note: r.admin_note || "" };
+              return (
+                <tr key={r.id} style={{ borderBottom: "1px solid var(--border, #eee)", verticalAlign: "top" }}>
+                  <SuggestionCell nowrap>{r.created_at}</SuggestionCell>
+                  <SuggestionCell>
+                    <code>{r.author_email || "—"}</code>
+                    {r.client_version ? <div className="muted">v{r.client_version}</div> : null}
+                  </SuggestionCell>
+                  <SuggestionCell minWidth={130}>{r.subject || "（件名なし）"}</SuggestionCell>
+                  <SuggestionCell minWidth={260} preWrap>
+                    {r.body}
+                    {r.page_url ? (
+                      <div style={{ marginTop: "0.35rem" }}>
+                        <a href={r.page_url} target="_blank" rel="noreferrer">
+                          投稿元ページ
+                        </a>
+                      </div>
+                    ) : null}
+                  </SuggestionCell>
+                  <SuggestionCell>
+                    <select
+                      value={d.status}
+                      onChange={(e) => {
+                        const v = e.target.value as "new" | "in_progress" | "done";
+                        updateDraft(r.id, { status: v });
+                        e.currentTarget.blur();
+                      }}
+                    >
+                      {SUGGESTION_STATUSES.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </SuggestionCell>
+                  <SuggestionCell minWidth={220}>
+                    <textarea
+                      rows={3}
+                      value={d.admin_note}
+                      onChange={(e) => updateDraft(r.id, { admin_note: e.target.value })}
+                    />
+                  </SuggestionCell>
+                  <SuggestionCell nowrap>
+                    <button type="button" className="btn-secondary" disabled={busy} onClick={() => void saveRow(r.id)}>
+                      保存
+                    </button>
+                  </SuggestionCell>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </TableScroll>
+      <PaginatedListFooter
+        loaded={rows.length}
+        total={total}
+        onLoadMore={() => {
+          void load(rows.length, true).catch((e) => setErr(String(e)));
+        }}
+      />
+    </AdminSection>
+  );
+}
+
+function AdminUsageScreen({ onBack }: { onBack: () => void }) {
+  return (
+    <main className="main">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.8rem" }}>
+        <div>
+          <h2 style={{ marginBottom: "0.25rem" }}>利用ログ（管理者専用）</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            稟議・運用判断向けの集計とイベントログです。
+          </p>
+        </div>
+        <button type="button" className="btn-secondary" onClick={onBack}>
+          通常画面へ戻る
+        </button>
+      </div>
+      <section style={{ marginTop: "1rem" }}>
+        <AdminUsagePanel />
+      </section>
+      <AdminSuggestionBoxPanel />
+    </main>
   );
 }
 
@@ -1851,8 +2406,9 @@ function AppMain({
   onLogout: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"general" | "admin" | "usage">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "admin">("general");
   const [authMe, setAuthMe] = useState<AuthMe | null>(null);
+  const [usageScreenOpen, setUsageScreenOpen] = useState(false);
   const [version, setVersion] = useState("");
   const [presets, setPresets] = useState<Record<string, { label: string }>>({});
   const [presetId, setPresetId] = useState("standard");
@@ -1893,20 +2449,33 @@ function AppMain({
   const [errorReportBusy, setErrorReportBusy] = useState(false);
   const [errorReportOk, setErrorReportOk] = useState<string | null>(null);
   const [errorReportErr, setErrorReportErr] = useState<string | null>(null);
+  const [suggestionSubject, setSuggestionSubject] = useState("");
+  const [suggestionBody, setSuggestionBody] = useState("");
+  const [suggestionBusy, setSuggestionBusy] = useState(false);
+  const [suggestionOk, setSuggestionOk] = useState<string | null>(null);
+  const [suggestionErr, setSuggestionErr] = useState<string | null>(null);
 
   const [notification, setNotification] = useState<"browser" | "webhook" | "email" | "none">("browser");
   const [email, setEmail] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [uploadLoaded, setUploadLoaded] = useState(0);
+  const [uploadTotal, setUploadTotal] = useState<number | null>(null);
   const [promptExtract, setPromptExtract] = useState<File | null>(null);
   const [promptMerge, setPromptMerge] = useState<File | null>(null);
+  const [supplementaryTeams, setSupplementaryTeams] = useState<File | null>(null);
+  const [supplementaryNotes, setSupplementaryNotes] = useState<File | null>(null);
   const [transcriptOnly, setTranscriptOnly] = useState(false);
-  const [whisperPreset, setWhisperPreset] = useState<"fast" | "balanced" | "accurate">("balanced");
+  const [whisperPreset, setWhisperPreset] = useState<"fast" | "balanced" | "accurate">("accurate");
   const [helpVisible, setHelpVisible] = useState(() => readHelpHash());
   const [fileDropActive, setFileDropActive] = useState(false);
   const fileDragDepth = useRef(0);
   const mainFileInputRef = useRef<HTMLInputElement>(null);
+  const supTeamsInputRef = useRef<HTMLInputElement>(null);
+  const supNotesInputRef = useRef<HTMLInputElement>(null);
   const pendingIdsRef = useRef<string[]>(pendingIds);
   /** 破棄・pending 追加のたびに増やし、古い tick の一覧更新を打ち切る */
   const pendingPollRevisionRef = useRef(0);
@@ -2273,6 +2842,7 @@ function AppMain({
   const effectiveLlmProvider = openaiFeatureEnabled ? llmProvider : "ollama";
 
   const canSubmit =
+    !uploading &&
     !!file &&
     (notification !== "webhook" || email.trim().length > 0) &&
     emailRecipientOk &&
@@ -2284,6 +2854,12 @@ function AppMain({
     setSettingsOpen(false);
     setSettingsTab("general");
   }, []);
+
+  useEffect(() => {
+    if (!serverOpenaiMode || !authMe?.is_admin) {
+      setUsageScreenOpen(false);
+    }
+  }, [serverOpenaiMode, authMe?.is_admin]);
 
   useEffect(() => {
     const onHash = () => setHelpVisible(readHelpHash());
@@ -2347,6 +2923,8 @@ function AppMain({
     fd.append("file", file);
     if (promptExtract) fd.append("prompt_extract", promptExtract);
     if (promptMerge) fd.append("prompt_merge", promptMerge);
+    if (supplementaryTeams) fd.append("supplementary_teams", supplementaryTeams);
+    if (supplementaryNotes) fd.append("supplementary_notes", supplementaryNotes);
     // 許可ダイアログは「ユーザー操作の直後」に開始しないと無視されるブラウザがあるため、await より前で呼ぶ
     let notifPermPromise: Promise<NotificationPermission> | null = null;
     if (
@@ -2362,9 +2940,20 @@ function AppMain({
       }
     }
     try {
-      const res = await createTask(fd);
+      setUploading(true);
+      setUploadPercent(0);
+      setUploadLoaded(0);
+      setUploadTotal(file.size > 0 ? file.size : null);
+      const res = await createTask(fd, {
+        onUploadProgress: (loaded, total, percent) => {
+          setUploadLoaded(loaded);
+          if (total != null && total > 0) setUploadTotal(total);
+          setUploadPercent(percent);
+        },
+      });
       pendingPollRevisionRef.current += 1;
       setPendingIds((p) => [...p, res.task_id]);
+      setUploadPercent(100);
       if (notifPermPromise) {
         try {
           const p = await notifPermPromise;
@@ -2375,13 +2964,21 @@ function AppMain({
       }
       setMsg("受け付けました。処理が始まるまで少しお待ちください。");
       setFile(null);
+      setSupplementaryTeams(null);
+      setSupplementaryNotes(null);
       const fin = mainFileInputRef.current;
       if (fin) fin.value = "";
+      const st = supTeamsInputRef.current;
+      if (st) st.value = "";
+      const sn = supNotesInputRef.current;
+      if (sn) sn.value = "";
     } catch (ex) {
       if (notifPermPromise) {
         void notifPermPromise.finally(() => setNotifPermission(getNotificationPermissionSafe()));
       }
       setErr(String(ex));
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -2391,6 +2988,8 @@ function AppMain({
     <div className="layout layout--app">
       {helpVisible ? (
         <HelpPage onClose={closeHelp} version={version} />
+      ) : usageScreenOpen && serverOpenaiMode && authMe?.is_admin ? (
+        <AdminUsageScreen onBack={() => setUsageScreenOpen(false)} />
       ) : (
         <>
       <header className="hero hero--compact">
@@ -2425,10 +3024,10 @@ function AppMain({
                       },
                       {
                         key: "usage",
-                        label: "利用状況・ログ",
+                        label: "利用ログ画面",
                         onClick: () => {
-                          setSettingsTab("usage");
-                          setSettingsOpen(true);
+                          closeSettings();
+                          setUsageScreenOpen(true);
                         },
                       },
                     ]
@@ -2791,11 +3390,34 @@ function AppMain({
           ) : null}
 
           <details>
+            <summary>参考資料（Teams・メモ）（任意）</summary>
+            <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0 0.5rem" }}>
+              メインの動画・文字起こしとは別に、Teams のトランスクリプトや手書きメモの .txt / .md / .vtt を渡すと、抽出・統合で固有名の照合や補足に使います（根拠は会話ログ優先）。
+            </p>
+            <label>Teams 等のトランスクリプト</label>
+            <input
+              ref={supTeamsInputRef}
+              type="file"
+              accept=".txt,.md,.vtt,text/plain,text/markdown"
+              onChange={(e) => setSupplementaryTeams(e.target.files?.[0] ?? null)}
+            />
+            <label>担当メモ・.md</label>
+            <input
+              ref={supNotesInputRef}
+              type="file"
+              accept=".txt,.md,.vtt,text/plain,text/markdown"
+              onChange={(e) => setSupplementaryNotes(e.target.files?.[0] ?? null)}
+            />
+          </details>
+          <details>
             <summary>カスタムプロンプト（任意）</summary>
             <label>抽出 .txt</label>
             <input type="file" accept=".txt" onChange={(e) => setPromptExtract(e.target.files?.[0] ?? null)} />
             <label>統合 .txt</label>
             <input type="file" accept=".txt" onChange={(e) => setPromptMerge(e.target.files?.[0] ?? null)} />
+            <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0" }}>
+              参考資料を使う場合は <code>{"{SUPPLEMENTARY_REFERENCE}"}</code> をテンプレに含めてください（省略時は自動で会話ログの直前／JSON の後に挿入されます）。
+            </p>
           </details>
 
           {msg ? <p className="muted">{msg}</p> : null}
@@ -2840,13 +3462,34 @@ function AppMain({
                 form="mm-task-form"
                 disabled={!canSubmit}
               >
-                解析をキューに追加
+                {uploading ? `アップロード中… ${Math.max(0, Math.min(100, uploadPercent))}%` : "解析をキューに追加"}
               </button>
             </div>
+            {uploading ? (
+              <div className="upload-progress" role="status" aria-live="polite">
+                <div className="upload-progress__meta">
+                  <span>アップロード進捗</span>
+                  <span>
+                    {formatUsageBytes(uploadLoaded)}
+                    {uploadTotal ? ` / ${formatUsageBytes(uploadTotal)}` : ""}
+                  </span>
+                </div>
+                <progress
+                  className="upload-progress__bar"
+                  max={100}
+                  value={Math.max(0, Math.min(100, uploadPercent))}
+                />
+              </div>
+            ) : null}
           </div>
 
           <section className="main-queue" aria-label="処理キュー">
             <h2 className="main-subhead">処理キュー</h2>
+            {authMe ? (
+              <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 0.5rem" }}>
+                全ユーザーの待機・実行中ジョブを表示します（共有ワーカーの順番が分かります）。自分のジョブだけ破棄・書き起こしダウンロードできます。
+              </p>
+            ) : null}
             <div className="queue">
               {queue.length === 0 ? (
                 <p className="muted" style={{ fontSize: "0.85rem", margin: 0 }}>
@@ -2859,6 +3502,13 @@ function AppMain({
                       <div className="queue-card__head">
                         <strong>{q.topic || "（議題なし）"}</strong>
                         <span className="muted queue-card__file">{q.filename}</span>
+                        {authMe && q.is_mine === false ? (
+                          <span className="queue-card__owner muted" title="このジョブの所有者">
+                            他ユーザー: {q.job_owner || q.email || "（不明）"}
+                          </span>
+                        ) : authMe && q.is_mine ? (
+                          <span className="queue-card__owner queue-card__owner--mine">自分</span>
+                        ) : null}
                       </div>
                       <div className="queue-card__times muted">
                         受付 {formatDbDateTime(q.created_at)}
@@ -2869,13 +3519,15 @@ function AppMain({
                         <button
                           type="button"
                           className="btn-primary btn-primary--queue-submit"
-                          disabled={!q.transcript_ready}
+                          disabled={!q.transcript_ready || q.is_mine === false}
                           title={
-                            q.transcript_ready
-                              ? "議事録ができる前に .md で保存できます（.txt/.srt 直読み・書き起こしのみは読み込み直後から可）"
-                              : String(q.status || "") === "processing:transcribing"
-                                ? "Whisper が文字起こし中です。完了までお待ちください"
-                                : "文字起こしが終わると押せます（動画・音声は数十秒〜）"
+                            q.is_mine === false
+                              ? "他ユーザーのジョブはダウンロードできません"
+                              : q.transcript_ready
+                                ? "議事録ができる前に .md で保存できます（.txt/.srt 直読み・書き起こしのみは読み込み直後から可）"
+                                : String(q.status || "") === "processing:transcribing"
+                                  ? "Whisper が文字起こし中です。完了までお待ちください"
+                                  : "文字起こしが終わると押せます（動画・音声は数十秒〜）"
                           }
                           onClick={() =>
                             void downloadExportTranscriptMd(q.id, `transcript_${exportBasename(q)}.md`).catch((e) =>
@@ -2885,7 +3537,13 @@ function AppMain({
                         >
                           書き起こしをダウンロード
                         </button>
-                        <button type="button" className="btn-discard btn-discard--compact" onClick={() => handleDiscardTask(q.id)}>
+                        <button
+                          type="button"
+                          className="btn-discard btn-discard--compact"
+                          disabled={q.is_mine === false}
+                          title={q.is_mine === false ? "他ユーザーのジョブは破棄できません" : undefined}
+                          onClick={() => handleDiscardTask(q.id)}
+                        >
                           処理を破棄
                         </button>
                       </div>
@@ -2997,9 +3655,7 @@ function AppMain({
           serverOpenaiMode && authMe?.is_admin
             ? settingsTab === "admin"
               ? "ユーザー・権限管理"
-              : settingsTab === "usage"
-                ? "利用状況・ログ"
-                : "設定"
+              : "設定"
             : "設定"
         }
       >
@@ -3022,15 +3678,6 @@ function AppMain({
               onClick={() => setSettingsTab("admin")}
             >
               ユーザー・権限
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={settingsTab === "usage"}
-              className={`settings-drawer-tab${settingsTab === "usage" ? " settings-drawer-tab--active" : ""}`}
-              onClick={() => setSettingsTab("usage")}
-            >
-              利用状況
             </button>
           </div>
         ) : null}
@@ -3159,6 +3806,71 @@ function AppMain({
               </section>
             ) : null}
 
+            {serverOpenaiMode && authMe ? (
+              <section className="settings-section">
+                <h3>目安箱</h3>
+                <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+                  改善案・要望・困りごとを管理者へ送信します。投稿は管理者専用の利用ログ画面で確認されます。
+                </p>
+                <label>件名（任意）</label>
+                <input
+                  value={suggestionSubject}
+                  onChange={(e) => {
+                    setSuggestionSubject(e.target.value);
+                    setSuggestionOk(null);
+                    setSuggestionErr(null);
+                  }}
+                  placeholder="例: 目安箱の一覧に検索を追加してほしい"
+                />
+                <label>内容（必須）</label>
+                <textarea
+                  rows={5}
+                  value={suggestionBody}
+                  onChange={(e) => {
+                    setSuggestionBody(e.target.value);
+                    setSuggestionOk(null);
+                    setSuggestionErr(null);
+                  }}
+                  placeholder="要望・背景・困っている点など"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={suggestionBusy || !suggestionBody.trim()}
+                  onClick={() => {
+                    void (async () => {
+                      setSuggestionBusy(true);
+                      setSuggestionOk(null);
+                      setSuggestionErr(null);
+                      try {
+                        const r = await submitSuggestionBox({
+                          subject: suggestionSubject.trim() || undefined,
+                          body: suggestionBody.trim(),
+                          page_url: typeof window !== "undefined" ? window.location.href : "",
+                          client_version: version || "",
+                        });
+                        setSuggestionOk(
+                          r.webhook_notified
+                            ? `送信しました（ID: #${r.id} / Webhook 通知済み）。`
+                            : `送信しました（ID: #${r.id}）。`,
+                        );
+                        setSuggestionSubject("");
+                        setSuggestionBody("");
+                      } catch (ex) {
+                        setSuggestionErr(String(ex));
+                      } finally {
+                        setSuggestionBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  {suggestionBusy ? "送信中…" : "目安箱を送信"}
+                </button>
+                {suggestionOk ? <p className="muted" style={{ fontSize: "0.85rem" }}>{suggestionOk}</p> : null}
+                {suggestionErr ? <p className="error-box">{suggestionErr}</p> : null}
+              </section>
+            ) : null}
+
             {errorReportAvailable ? (
               <section className="settings-section">
                 <h3>不具合・エラーの報告</h3>
@@ -3242,11 +3954,6 @@ function AppMain({
           </section>
         ) : null}
 
-        {settingsTab === "usage" && serverOpenaiMode && authMe?.is_admin ? (
-          <section className="settings-section">
-            <AdminUsagePanel />
-          </section>
-        ) : null}
       </SettingsDrawer>
     </div>
   );
