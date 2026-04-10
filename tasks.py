@@ -430,6 +430,110 @@ def extract_json_block(text):
     return None
 
 
+def _extract_retry_max() -> int:
+    """抽出JSONが不正な場合の再試行回数（追加試行）。既定1回。"""
+    raw = (os.getenv("MM_EXTRACT_SCHEMA_RETRY") or "1").strip()
+    try:
+        return max(0, min(3, int(raw)))
+    except ValueError:
+        return 1
+
+
+def _shorten_text(s: str, max_len: int = 800) -> str:
+    t = (s or "").strip()
+    if len(t) <= max_len:
+        return t
+    return t[:max_len] + "…"
+
+
+def _validate_extraction_payload(data):
+    """抽出結果JSONの基本スキーマを検証して (ok, errors) を返す。"""
+    errors = []
+    if not isinstance(data, dict):
+        return False, ["トップレベルはJSONオブジェクトである必要があります。"]
+
+    for key in ("decisions", "issues", "items", "notes"):
+        if key not in data:
+            errors.append(f"必須キー `{key}` がありません。")
+            continue
+        if not isinstance(data.get(key), list):
+            errors.append(f"`{key}` は配列である必要があります。")
+
+    def _is_evidence_list(ev):
+        return isinstance(ev, list) and all(isinstance(x, str) and x.strip() for x in ev)
+
+    for idx, entry in enumerate(data.get("decisions", []) if isinstance(data.get("decisions"), list) else []):
+        if isinstance(entry, str):
+            continue  # 既存互換
+        if not isinstance(entry, dict):
+            errors.append(f"decisions[{idx}] はオブジェクトである必要があります。")
+            continue
+        if not isinstance(entry.get("text"), str) or not entry.get("text", "").strip():
+            errors.append(f"decisions[{idx}].text は必須の文字列です。")
+        if not _is_evidence_list(entry.get("evidence")):
+            errors.append(f"decisions[{idx}].evidence は空でない文字列配列が必要です。")
+
+    for idx, entry in enumerate(data.get("issues", []) if isinstance(data.get("issues"), list) else []):
+        if isinstance(entry, str):
+            continue  # 既存互換
+        if not isinstance(entry, dict):
+            errors.append(f"issues[{idx}] はオブジェクトである必要があります。")
+            continue
+        if not isinstance(entry.get("text"), str) or not entry.get("text", "").strip():
+            errors.append(f"issues[{idx}].text は必須の文字列です。")
+        if not _is_evidence_list(entry.get("evidence")):
+            errors.append(f"issues[{idx}].evidence は空でない文字列配列が必要です。")
+
+    for idx, entry in enumerate(data.get("items", []) if isinstance(data.get("items"), list) else []):
+        if isinstance(entry, str):
+            continue  # 既存互換
+        if not isinstance(entry, dict):
+            errors.append(f"items[{idx}] はオブジェクトである必要があります。")
+            continue
+        if not isinstance(entry.get("what"), str) or not entry.get("what", "").strip():
+            errors.append(f"items[{idx}].what は必須の文字列です。")
+        who = entry.get("who")
+        due = entry.get("due")
+        if who is not None and not isinstance(who, str):
+            errors.append(f"items[{idx}].who は文字列またはnullです。")
+        if due is not None and not isinstance(due, str):
+            errors.append(f"items[{idx}].due は文字列またはnullです。")
+        if not _is_evidence_list(entry.get("evidence")):
+            errors.append(f"items[{idx}].evidence は空でない文字列配列が必要です。")
+
+    for idx, entry in enumerate(data.get("notes", []) if isinstance(data.get("notes"), list) else []):
+        if isinstance(entry, str):
+            continue  # 既存互換
+        if not isinstance(entry, dict):
+            errors.append(f"notes[{idx}] はオブジェクトである必要があります。")
+            continue
+        if not isinstance(entry.get("text"), str) or not entry.get("text", "").strip():
+            errors.append(f"notes[{idx}].text は必須の文字列です。")
+        if not _is_evidence_list(entry.get("evidence")):
+            errors.append(f"notes[{idx}].evidence は空でない文字列配列が必要です。")
+
+    return len(errors) == 0, errors
+
+
+def _build_extract_schema_retry_prompt(base_prompt: str, validation_errors, previous_output: str) -> str:
+    errs = validation_errors or ["JSONスキーマ違反"]
+    err_lines = "\n".join(f"- {e}" for e in errs[:12])
+    prev = _shorten_text(previous_output, 1200) or "(空)"
+    extra = (
+        "\n\n# 再出力指示（必須）\n"
+        "直前の出力はJSONスキーマ違反でした。以下のエラーを修正し、"
+        "同じ入力テキストを根拠に JSON のみを再出力してください。\n"
+        "前置き・注釈・コードブロックは禁止です。\n"
+        "不明な項目は推測せず null を使ってください。\n"
+        "evidence は必ず空でない配列にしてください。\n\n"
+        "## 検証エラー\n"
+        f"{err_lines}\n\n"
+        "## 直前の出力（抜粋）\n"
+        f"{prev}\n"
+    )
+    return (base_prompt or "") + extra
+
+
 def call_llm(prompt, config, temperature=0.0, json_mode=False, ollama_phase=None):
     cfg = config or {}
     provider = cfg.get("provider", "ollama")
@@ -933,29 +1037,57 @@ def process_video_task(
         extracted_results = []
         extraction_errors = []
         total_chunks = len(chunks_for_ai)
+        retry_max = _extract_retry_max()
+        skipped_chunks = 0
 
         for i, chunk_text in enumerate(chunks_for_ai):
             if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
                 return
             db.update_record(task_id, owner_username or "", status=f"processing:extracting ({i+1}/{total_chunks})")
-            prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
+            base_prompt = extract_shell.replace("{CHUNK_TEXT}", chunk_text)
+            prompt = base_prompt
             te0 = time.perf_counter()
+            chunk_ok = False
+            final_chunk_errors = []
             try:
-                response_text = call_llm(
-                    prompt,
-                    llm_config,
-                    temperature=0,
-                    json_mode=True,
-                    ollama_phase="extract",
-                )
-                data = extract_json_block(response_text)
-                if data:
-                    extracted_results.append(data)
-            except Exception as e:
-                print(f"Extraction failed for chunk {i}: {e}")
-                extraction_errors.append(f"Chunk {i}: {str(e)}")
+                for attempt in range(retry_max + 1):
+                    try:
+                        response_text = call_llm(
+                            prompt,
+                            llm_config,
+                            temperature=0,
+                            json_mode=True,
+                            ollama_phase="extract",
+                        )
+                    except Exception as e:
+                        final_chunk_errors = [f"LLM呼び出し失敗: {str(e)}"]
+                        if attempt < retry_max:
+                            continue
+                        break
+
+                    data = extract_json_block(response_text)
+                    if data is None:
+                        validation_errors = ["JSONとして解釈できませんでした。"]
+                    else:
+                        ok, validation_errors = _validate_extraction_payload(data)
+                        if ok:
+                            extracted_results.append(data)
+                            chunk_ok = True
+                            break
+
+                    final_chunk_errors = validation_errors
+                    if attempt < retry_max:
+                        prompt = _build_extract_schema_retry_prompt(base_prompt, validation_errors, response_text)
+                        continue
             finally:
                 extract_llm_sec += time.perf_counter() - te0
+
+            if not chunk_ok:
+                skipped_chunks += 1
+                if final_chunk_errors:
+                    extraction_errors.append(f"Chunk {i+1}: {' / '.join(final_chunk_errors[:5])}")
+                else:
+                    extraction_errors.append(f"Chunk {i+1}: 不明な抽出エラー")
 
         if not extracted_results:
             detail = (
@@ -970,6 +1102,14 @@ def process_video_task(
                 detail += "No errors captured, but no JSON data was extracted."
             fail(detail)
             return
+
+        if skipped_chunks > 0:
+            logger.warning(
+                "抽出チャンクの一部をスキップして継続します: skipped=%s total=%s task_id=%s",
+                skipped_chunks,
+                total_chunks,
+                task_id,
+            )
 
         if _cleanup_if_cancelled(task_id, owner_username, file_path, audio_path, llm_config, ollama_model):
             return

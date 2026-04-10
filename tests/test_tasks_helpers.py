@@ -168,6 +168,43 @@ def test_json_and_supplementary_helpers(tasks_mod, tmp_path, monkeypatch):
     assert tasks_mod._media_duration_sec_from_segments(["x"]) == 0.0
 
 
+def test_extract_schema_retry_helper_and_validation(tasks_mod, monkeypatch):
+    monkeypatch.delenv("MM_EXTRACT_SCHEMA_RETRY", raising=False)
+    assert tasks_mod._extract_retry_max() == 1
+    monkeypatch.setenv("MM_EXTRACT_SCHEMA_RETRY", "3")
+    assert tasks_mod._extract_retry_max() == 3
+    monkeypatch.setenv("MM_EXTRACT_SCHEMA_RETRY", "999")
+    assert tasks_mod._extract_retry_max() == 3
+    monkeypatch.setenv("MM_EXTRACT_SCHEMA_RETRY", "abc")
+    assert tasks_mod._extract_retry_max() == 1
+
+    assert tasks_mod._shorten_text("abc", 10) == "abc"
+    short = tasks_mod._shorten_text("abcdef", 3)
+    assert short.startswith("abc")
+    assert short != "abcdef"
+
+    ok, errs = tasks_mod._validate_extraction_payload({"decisions": [], "issues": [], "items": [], "notes": []})
+    assert ok is True
+    assert errs == []
+
+    ok2, errs2 = tasks_mod._validate_extraction_payload("bad")
+    assert ok2 is False
+    assert "トップレベルはJSONオブジェクト" in errs2[0]
+
+    ok3, errs3 = tasks_mod._validate_extraction_payload(
+        {
+            "decisions": [{"text": "", "evidence": []}],
+            "issues": [{"text": "i", "evidence": [""]}],
+            "items": [{"who": 1, "what": "", "due": 2, "evidence": []}],
+            "notes": [{"text": "", "evidence": []}],
+        }
+    )
+    assert ok3 is False
+    assert any("decisions[0].text" in e for e in errs3)
+    assert any("items[0].who" in e for e in errs3)
+    assert any("notes[0].text" in e or "notes[0].evidence" in e for e in errs3)
+
+
 def test_small_side_effect_helpers(tasks_mod, tmp_path, monkeypatch):
     f1 = tmp_path / "a.txt"
     f2 = tmp_path / "b.txt"
@@ -824,6 +861,88 @@ def test_process_video_task_merge_fallback_and_empty_merge_prompt(tasks_mod, tmp
     assert '"decisions"' in state["summary"]
 
 
+def test_process_video_task_extract_retry_and_partial_continue(tasks_mod, tmp_path, monkeypatch):
+    src = tmp_path / "input.txt"
+    src.write_text("line1\n\nline2", encoding="utf-8")
+    p_ex = tmp_path / "extract.txt"
+    p_mg = tmp_path / "merge.txt"
+    p_ex.write_text("EX:{CHUNK_TEXT}", encoding="utf-8")
+    p_mg.write_text("MG:{EXTRACTED_JSON}", encoding="utf-8")
+
+    state = {
+        "status": "pending",
+        "topic": "",
+        "meeting_date": "",
+        "category": "",
+        "tags": "",
+        "preset_id": "",
+        "context_json": "",
+        "summary": "",
+        "transcript": "",
+    }
+    seen_extract_prompts = []
+
+    monkeypatch.setenv("MM_EXTRACT_SCHEMA_RETRY", "1")
+    monkeypatch.setattr(tasks_mod.db, "purge_expired_minutes", lambda *_a, **_k: 0)
+    monkeypatch.setattr(tasks_mod.db, "get_record", lambda *_a, **_k: state)
+    monkeypatch.setattr(tasks_mod.db, "parse_context_json", lambda _r: {})
+    monkeypatch.setattr(tasks_mod.db, "update_usage_job_metrics", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tasks_mod.db,
+        "update_record",
+        lambda _tid, _owner="", status=None, transcript=None, summary=None: state.update(
+            {
+                **({"status": status} if status is not None else {}),
+                **({"transcript": transcript} if transcript is not None else {}),
+                **({"summary": summary} if summary is not None else {}),
+            }
+        ),
+    )
+    monkeypatch.setattr(tasks_mod, "_flush_whisper_before_ollama", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks_mod, "_try_ollama_unload_for_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks_mod, "build_chunks_from_segments", lambda *_a, **_k: (["c1", "c2"], "raw"))
+
+    calls = {"extract": 0}
+
+    def _llm(prompt, _cfg, temperature=0.0, json_mode=False, ollama_phase=None):
+        if json_mode:
+            seen_extract_prompts.append(prompt)
+            calls["extract"] += 1
+            # chunk1: 1回目/2回目ともスキーマ不正 -> スキップされる
+            if calls["extract"] in (1, 2):
+                return json.dumps({"decisions": [{"text": "d"}], "issues": [], "items": [], "notes": []}, ensure_ascii=False)
+            # chunk2: 1回目は不正、2回目で回復
+            if calls["extract"] == 3:
+                return "not-json"
+            return json.dumps(
+                {
+                    "decisions": [{"text": "d2", "evidence": ["00:00:01-00:00:02"]}],
+                    "issues": [],
+                    "items": [],
+                    "notes": [],
+                },
+                ensure_ascii=False,
+            )
+        assert ollama_phase == "merge"
+        return "ok summary"
+
+    monkeypatch.setattr(tasks_mod, "call_llm", _llm)
+
+    tasks_mod.process_video_task(
+        "tr1",
+        "u@example.com",
+        "input.txt",
+        str(src),
+        llm_config={"notification_type": "browser"},
+        prompt_paths={"extract": str(p_ex), "merge": str(p_mg)},
+        owner_username="owner@example.com",
+    )
+
+    assert state["status"] == "completed"
+    assert "ok summary" in state["summary"]
+    assert any("再出力指示（必須）" in p for p in seen_extract_prompts[1:])
+
+
 def test_process_video_task_early_return_and_outer_exception(tasks_mod, tmp_path, monkeypatch):
     src = tmp_path / "input.txt"
     src.write_text("line1", encoding="utf-8")
@@ -973,7 +1092,7 @@ def test_process_video_task_additional_fail_and_cancel_points(tasks_mod, tmp_pat
     tasks_mod.process_video_task("t_more1", "u@example.com", "a.mp3", str(src), llm_config={"notification_type": "webhook"}, owner_username="o")
     assert state["status"] == "cancelled"
 
-    # fail() inside extraction_errors empty branch (958)
+    # fail() inside extraction invalid-json branch
     src2 = tmp_path / "b.txt"
     src2.write_text("a\n\nb", encoding="utf-8")
     st2 = {"status": "pending", "topic": "", "meeting_date": "", "category": "", "tags": "", "preset_id": "", "context_json": "", "summary": ""}
@@ -982,7 +1101,7 @@ def test_process_video_task_additional_fail_and_cancel_points(tasks_mod, tmp_pat
     monkeypatch.setattr(tasks_mod, "call_llm", lambda *_a, **_k: "not-json")
     monkeypatch.setattr(tasks_mod, "build_chunks_from_segments", lambda *_a, **_k: (["c1"], "raw"))
     tasks_mod.process_video_task("t_more2", "u@example.com", "b.txt", str(src2), llm_config={"notification_type": "webhook"}, owner_username="o")
-    assert "No errors captured" in st2["summary"]
+    assert "Chunk 1: JSONとして解釈できませんでした。" in st2["summary"]
 
     # cancel at loop start (926-927), before merging (963-964), outer except cancelled (1036-1037)
     src3 = tmp_path / "c.txt"
