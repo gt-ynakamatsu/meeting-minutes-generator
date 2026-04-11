@@ -46,6 +46,7 @@ class UploadGuardSettings:
 
 
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    # 環境変数は不正値が入り得るため、必ず下限付きでフォールバックする。
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
@@ -107,6 +108,7 @@ def _check_submit_rate_limit(actor_key: str, settings: Optional[UploadGuardSetti
     window_sec = cfg.rate_limit_window_sec
     now = time.monotonic()
     with _SUBMIT_RATE_LOCK:
+        # ユーザー単位で短時間の投入履歴を保持し、古い窓外データを先に掃除する。
         q = _SUBMIT_RATE_STATE.get(actor_key)
         if q is None:
             q = deque()
@@ -132,6 +134,7 @@ def _check_upload_capacity_guard(settings: Optional[UploadGuardSettings] = None,
     warn_b = warn_gb * _GIB
     min_b = min_gb * _GIB
 
+    # warn は運用ログのみ、min は受け付け拒否（503）として扱う。
     if warn_b > 0 and free < warn_b:
         logger.warning(
             "アップロード保存先の空き容量が少なくなっています: free=%.2f GiB",
@@ -164,6 +167,7 @@ async def _save_upload_file_stream(
             if not chunk:
                 break
             total += len(chunk)
+            # 読み込み途中でも即時に上限チェックし、巨大ファイルでの無駄書き込みを避ける。
             if total > limit_bytes:
                 db.record_usage_guard_event("upload_too_large", actor_key)
                 raise HTTPException(
@@ -195,6 +199,7 @@ async def create_task(
     owner = (_auth or "").strip()
     record_email = (meta.email or "").strip()
     email_for_worker: Optional[str] = None
+    # 制限は「ログインID優先、未ログイン時は入力メール、最後に匿名キー」で評価する。
     actor_key = owner or record_email or "anonymous"
     guard_settings = _upload_guard_settings()
     _check_submit_rate_limit(actor_key, settings=guard_settings)
@@ -300,6 +305,7 @@ async def create_task(
         transcript_only=bool(meta.transcript_only),
     )
 
+    # 集計では OpenAI / Ollama で参照元のモデル項目が異なるため、ここで正規化する。
     model_for_log = (
         (openai_model or meta.openai_model or "gpt-4o-mini").strip()
         if meta.llm_provider == "openai"
@@ -322,6 +328,7 @@ async def create_task(
 
     whisper_bundle = {"whisper_preset": meta.whisper_preset}
 
+    # worker 互換のため、通知方法・書き起こしのみフラグは llm_config に同梱する。
     if meta.llm_provider == "openai":
         llm_config = {
             "provider": "openai",
