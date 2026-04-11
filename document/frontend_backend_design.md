@@ -49,7 +49,7 @@ flowchart LR
 ```
 
 - **フロントエンド**: Vite + React + TypeScript。本番では Nginx が静的ファイルを配信し、`/api/*` を FastAPI にリバースプロキシする。
-- **API サーバ**: FastAPI。DB 読み書き、ファイル受け取り、Celery タスク投入のみ。**Torch / Whisper を import しない**（軽量イメージ化のため）。エンドポイントは **`backend/main.py`** でアプリを組み立て、**`backend/routes/`**（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records`）に分割。共通処理は **`backend/ollama_client.py`**（Ollama の URL・**`/api/tags`**・**`try_ollama_unload_model`**）、**`backend/presets_io.py`**、**`backend/http_utils.py`** 等に集約。**Ollama 推論の `POST /api/generate`** は **API コンテナでは呼ばず**、**ワーカー `tasks.call_llm`** が **`requests`** で **`ollama_generate_url()`** へ送る。
+- **API サーバ**: FastAPI。DB 読み書き、ファイル受け取り、Celery タスク投入のみ。**Torch / Whisper を import しない**（軽量イメージ化のため）。エンドポイントは **`backend/main.py`** でアプリを組み立て、**`backend/routes/`**（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records` / `feedback`）に分割。共通処理は **`backend/ollama_client.py`**（Ollama の URL・**`/api/tags`**・**`try_ollama_unload_model`**）、**`backend/presets_io.py`**、**`backend/http_utils.py`** 等に集約。**Ollama 推論の `POST /api/generate`** は **API コンテナでは呼ばず**、**ワーカー `tasks.call_llm`** が **`requests`** で **`ollama_generate_url()`** へ送る。
 - **ワーカー**: 従来どおり `tasks.py`（`celery_app` にタスクを登録）。Redis 経由でジョブを受け取る。
 - **共有ボリューム**: `data/`（DB・ユーザープロンプト一時）、`downloads/`（アップロード媒体）。
 
@@ -95,6 +95,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | `routes/presets.py` | `/api/presets`（中身は `presets_io`） |
 | `routes/jobs.py` | `POST /api/tasks` |
 | `routes/records.py` | `/api/records`, `/api/queue`, 破棄・エクスポート・summary |
+| `routes/feedback.py` | `/api/feedback/*`（目安箱投稿・エラー報告） |
 | `ollama_client.py` | **`OLLAMA_BASE_URL`** 解決、**`GET /api/tags`**（モデル名一覧）、**`/api/generate` の URL**（**`ollama_generate_url`**）、**`try_ollama_unload_model`**（**`keep_alive: 0`** の POST。VRAM 解放。**api** はタグ取得のみ、**tasks** が URL とアンロードを利用） |
 | `presets_io.py` | `presets_builtin.json`（**api**・**tasks.py**・**Streamlit `app.py`** で共有） |
 | `storage.py` | ユーザープロンプト・**参考資料（Teams/メモ）**一時ファイル（**`merge_task_prompt_paths`**。**api** の multipart と **Streamlit**） |
@@ -150,7 +151,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - **認証有効**かつ OpenAI: フォームのキーではなく **registry に保存された API キー**を使用。未保存なら 400
   - **認証オフ**かつ OpenAI: 従来どおりリクエストの **`openai_api_key`** 必須
 - Ollama: **`ollama_model`** 文字列（ワーカーが `OLLAMA_BASE_URL` へ接続するときのモデル名）
-- **Ollama 推論オプション（クライアント `metadata` では指定しない）**: ワーカー **`tasks.call_llm`**（Ollama 経路）が **`requests.post(ollama_generate_url(), …)`** で送る。**`options.num_ctx` は既定 4096**（**`backend/ollama_model_profiles.py`**。VRAM・KV 負荷抑制。**`8192` から引き下げた経緯**は **`document/design_spec.md` §3.1.2**）。**`MM_OLLAMA_PROFILES_PATH`** の JSON でモデル別上書き可。**`timeout=600`** 秒。
+- **Ollama 推論オプション（クライアント `metadata` では指定しない）**: ワーカー **`tasks.call_llm`**（Ollama 経路）が **`requests.post(ollama_generate_url(), …)`** で送る。**`options.num_ctx` は既定 4096**（**`backend/ollama_model_profiles.py`**。VRAM・KV 負荷抑制。**`8192` から引き下げた経緯**は **`document/design_spec.md` §3.1.2**）。**`MM_OLLAMA_PROFILES_PATH`** の JSON でモデル別上書き可。HTTP タイムアウトは通常 **`MM_OLLAMA_TIMEOUT_SEC`**（既定 600 秒）、merge は **`MM_OLLAMA_MERGE_TIMEOUT_SEC`**（未設定時は通常値を継承）。
 - **Ollama VRAM 早期解放**: **`backend/ollama_client.try_ollama_unload_model`** を **`tasks._try_ollama_unload_for_config`** から呼ぶ。対象は **`_cleanup_after_cancel`**（処理途中の破棄）、**`fail()` によるエラー完了**、**`process_video_task` 外側の `except`**（いずれも OpenAI 経路ではスキップ）。**`process_video_task` 先頭で既に cancelled の早期 return**（Ollama 未使用想定）は **アンロードしない**。環境変数 **`OLLAMA_UNLOAD_ON_TASK_END`** が **`0` / `false` / `no`** のときはアンロード要求を送らない（既定はオン扱い）。
 - **マージ LLM 失敗時**: **`call_llm` が例外**（タイムアウト等）のとき **`Merge failed (Error: …)` と抽出 JSON** を連結した文字列を **`summary`** にし、**`status` は `completed`** のまま（**このフォールバック経路では `try_ollama_unload` は呼ばない**。実装上の注意として、タイムアウト後も Ollama 側がモデル保持し続ける場合は **`OLLAMA_UNLOAD_ON_TASK_END`** 運用やサーバ側設定の検討対象）。
 - 会議メタ: `topic`, `meeting_date`, `category`, `tags`, `preset_id`
@@ -212,7 +213,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 議事録一覧（フィルタ・件数・ページング） | **`database.py`**: **`_recent_records_where_clause`**、**`count_recent_records`**、**`get_recent_records(..., limit=None, offset=0)`**（`limit` 省略時は **LIMIT なし**で全件。指定時は **`ORDER BY created_at DESC` + `LIMIT`/`OFFSET`**） | **`routes/records.py`** の **`GET /api/records`** が `count_recent_records` と `get_recent_records` を呼び **`RecordsPageResponse`** を返す。React の **`listRecords`**（`frontend/src/api.ts`）が `limit`/`offset` を付与可能 |
 | OpenAI 連携の ON/OFF | **`feature_flags.py`**（**`MM_OPENAI_ENABLED`**。`0` / `false` / `no` / `off` / 空でオフ。未設定時はオン＝後方互換） | API・ワーカー・Streamlit で共通。オフ時は `PATCH /api/me/llm` 不可・`POST /api/tasks` で `openai` 不可。 |
 | API から Ollama への接続（タグ一覧・URL 解決） | **`backend/ollama_client.py`**（**`OLLAMA_BASE_URL`**、未設定時は `http://127.0.0.1:11434`）。呼び出しは **`routes/meta.py`** | Docker では **api を `llm-net` に参加**させ、ワーカーと同じ Ollama ホストを指定。**ワーカー**の推論 URL も同一モジュールで整合。 |
-| Ollama 推論（`num_ctx`・タイムアウト） | **`tasks.call_llm`** → **`requests.post`**（**`backend/ollama_client.ollama_generate_url()`**）。**`num_ctx: 4096`**・**`timeout=600`**（コード固定。環境変数では切り替えない） | UI・`metadata` からは変更不可。**`pipeline/02_extract.py`**・**`03_merge.py`** は各自 **`OLLAMA_URL`**／**`NUM_CTX=4096`**・**`REQ_TIMEOUT=600`**（ワーカーと同趣旨）。**VRAM アンロード**: **`try_ollama_unload_model`**・**`OLLAMA_UNLOAD_ON_TASK_END`**（§5.1） |
+| Ollama 推論（`num_ctx`・タイムアウト） | **`tasks.call_llm`** → **`requests.post`**（**`backend/ollama_client.ollama_generate_url()`**）。**`num_ctx: 4096`**、タイムアウトは通常 **`MM_OLLAMA_TIMEOUT_SEC`**（既定 600）／merge **`MM_OLLAMA_MERGE_TIMEOUT_SEC`**（未設定時は通常値） | UI・`metadata` からは変更不可。**`pipeline/02_extract.py`**・**`03_merge.py`** は各自 **`OLLAMA_URL`**／**`NUM_CTX=4096`**・**`REQ_TIMEOUT=600`**（ワーカーと同趣旨）。**VRAM アンロード**: **`try_ollama_unload_model`**・**`OLLAMA_UNLOAD_ON_TASK_END`**（§5.1） |
 | プリセット JSON の単一ソース | **`backend/presets_io.py`** | **`routes/presets.py`**・**`tasks.py`**・**Streamlit `app.py`** が同じ読み込み経路を使う。 |
 | エクスポートヘッダ・行 dict 化 | **`backend/http_utils.py`** | **`routes/records.py`** で利用。 |
 | ログイン時パスワード検証 | **`backend/passwords.py`** | **`routes/auth.py`** で利用。 |
@@ -297,7 +298,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
   - 議事録 DB 保持: **`MM_MINUTES_RETENTION_DAYS`**（**`database.minutes_retention_days()`**。未設定時は **90**。**183 は 90 として扱う**。**0 以下**で自動削除オフ。Compose 既定 **`:-90`**）
   - ワーカー（参考資料）: **`MM_SUPPLEMENTARY_MAX_CHARS`** … Teams/メモ参考テキスト結合後の**文字数上限**（既定 **120000**）。**ワーカー import 時**に読み取り。**変更後は worker 再起動**。**根拠・トレードオフ**は **`document/design_spec.md` §3.1.2**
   - ワーカー（Ollama オプション上書き）: **`MM_OLLAMA_PROFILES_PATH`** … JSON で **`num_ctx` 等**をモデル名プレフィックス別に指定（**`config/ollama_profiles.example.json`**）。**`MM_OLLAMA_PROFILES=0`** で無効
-  - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（**`pipeline/02_extract.py`**・**`03_merge.py`**）。いずれも **`_ollama_generate_url()`** で URL を組み立て、**`num_ctx` 4096**・**タイムアウト 600 秒**（**`02_extract`** はペイロード内、**`03_merge`** は **`NUM_CTX` / `REQ_TIMEOUT`**）。**`extract_json_block`** は **`02_extract` 内の関数**（**`tasks.py` に同名関数**があり、ワーカーはそちらを使用。共通化モジュールはない）
+  - CLI パイプライン: `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（**`pipeline/02_extract.py`**・**`03_merge.py`**）。いずれも **`_ollama_generate_url()`** で URL を組み立て、**`num_ctx` 4096**・既定タイムアウト 600 秒（**`02_extract`** はペイロード内、**`03_merge`** は **`NUM_CTX` / `REQ_TIMEOUT`**）。ワーカー側は **`MM_OLLAMA_TIMEOUT_SEC` / `MM_OLLAMA_MERGE_TIMEOUT_SEC`** で上書き可。**`extract_json_block`** は **`02_extract` 内の関数**（**`tasks.py` に同名関数**があり、ワーカーはそちらを使用。共通化モジュールはない）
   - ローカル開発: リポジトリ直下 `.env` の `VITE_DEV_API_PROXY`（Vite が `/api` を転送する先）
 - **既定値**（例: API の CORS に `localhost:5173`、Celery の `redis://localhost:6379/0`、ワーカーの `OLLAMA_BASE_URL=http://ollama-server:11434`）は **開発・Compose 向けのデフォルト**（`llm-net` 上の Ollama コンテナ名想定）であり、本番では `.env` やオーケストレーション側で上書きすること。
 
@@ -361,7 +362,7 @@ API とフロントは同一 Docker ネットワーク上で、`frontend` の Ng
 | 1.14 | 2026-03-27 | **§6** Ollama モデル UI を**コンボボックスから `<select>` のみ**に変更（手入力不可） |
 | 1.15 | 2026-03-27 | **§5.1**・**§7.1**・**§11** に Ollama **`num_ctx: 4096`**（ワーカー `call_llm`）・**600 秒タイムアウト**、CLI **`pipeline/02_extract.py` / `03_merge.py`** との整合を追記（VRAM／KV 負荷・CPU オフロード抑制のため `8192` から変更） |
 | 1.19 | 2026-03-28 | **コードに合わせて再同期**: **`GET /api/auth/status`** の拡張フィールド、**`ollama_client` と `tasks.call_llm` の役割分担**、**`try_ollama_unload_model` / `OLLAMA_UNLOAD_ON_TASK_END`**、**マージ失敗フォールバック**（`completed`・アンロード非呼び出し）、**`@celery_app.task`**、**`extract_json_block` は tasks と 02_extract に重複**（§2・§4.2・§4.3・§5・§5.1・§6・§7.1・§11） |
-| 1.20 | 2026-03-28 | **議事録保存期限**: **`MM_MINUTES_RETENTION_DAYS`** 既定 **30 日**（約1か月）、**183 → 30 読み替え**、**`minutes_retention_days` / purge**（§7.1・§11）。**`AuthStatusResponse`** に **`minutes_retention_days`**・**`error_report_available`**（§5）。**§5.1** に **`transcript_only`**・**`whisper_preset`**。**§6** にヘルプ、アーカイブ見出し下の保存期間説明、Whisper 品質 UI、**`<select>` の `blur()`** |
+| 1.20 | 2026-03-28 | **議事録保存期限**: **`MM_MINUTES_RETENTION_DAYS`** 既定 **90 日**（約3か月）、**183 → 90 読み替え**、**`minutes_retention_days` / purge**（§7.1・§11）。**`AuthStatusResponse`** に **`minutes_retention_days`**・**`error_report_available`**（§5）。**§5.1** に **`transcript_only`**・**`whisper_preset`**。**§6** にヘルプ、アーカイブ見出し下の保存期間説明、Whisper 品質 UI、**`<select>` の `blur()`** |
 | 1.21 | 2026-03-28 | **`GET /api/records`**: クエリ **`limit` / `offset`**、レスポンス **`{ items, total }`**（**`RecordsPageResponse`**）。**§6** 議事録アーカイブに **10 件ページング**・前へ次へ・フィルタ変更時のリセット。**§7.1** に **`count_recent_records` / `get_recent_records` のページング**。**Streamlit は `limit` 省略で全件**の旨を §5 に追記 |
 | 1.22 | 2026-04-03 | **`POST /api/tasks`** に **`supplementary_teams` / `supplementary_notes`**。**§5.1** の **`num_ctx`** 説明を **`design_spec.md` §3.1.2** とプロファイル上書きに接続。**§8**・**§4.3** の **`storage` / `merge_task_prompt_paths`**。**§11** に **`MM_SUPPLEMENTARY_MAX_CHARS`**・**`MM_OLLAMA_PROFILES_PATH`** |
 | 1.23 | 2026-04-03 | **`GET /api/queue`**: 認証時 **全ユーザーの待機・処理中**を返す（**`job_owner` / `is_mine`**）。**`get_active_queue_records_global`** |

@@ -49,7 +49,7 @@ graph TB
 ### 2.2 API コンテナ内のモジュール分割（FastAPI）
 
 *   **`backend/main.py`**: アプリケーション生成、**CORS**、**lifespan**（起動時 DB 初期化・保持期限パージ）、各 **`APIRouter`** の `include_router` のみ。
-*   **`backend/routes/`**: パス別ハンドラ（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records`）。肥大化した単一 `main` を避け、変更箇所の特定を容易にする。
+*   **`backend/routes/`**: パス別ハンドラ（`meta` / `auth` / `admin` / `profile` / `presets` / `jobs` / `records` / `feedback`）。肥大化した単一 `main` を避け、変更箇所の特定を容易にする。
 *   **共通ライブラリ（API とワーカー／Streamlit で共有しうる軽量モジュール）**:
     *   **`backend/ollama_client.py`** … Ollama のベース URL、タグ一覧取得（**api**）、**`ollama_generate_url`** と **`try_ollama_unload_model`**（**worker** の **`tasks`** が推論先 URL と VRAM 解放に利用。**`POST /api/generate` の HTTP クライアントは `tasks.call_llm` の `requests`**）
     *   **`backend/presets_io.py`** … `presets_builtin.json`（**api**・**tasks**・**app.py**）

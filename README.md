@@ -7,7 +7,7 @@
 *   **高品質AI議事録**: 「分割(Chunk) → 抽出(Extract) → 統合(Merge)」の3段階パイプラインを採用。長時間の会議でも文脈を見失わず、決定事項・課題・ネクストアクションを漏れなく抽出します。
 *   **構造化フォーマット**: 議事録は Markdown 形式で出力され、決定事項・課題・アクション・重要メモに分類されます。
 *   **マルチフォーマット対応**: 動画/音声ファイルだけでなく、SRT（字幕ファイル）やテキストファイルからの議事録作成もサポートしています。
-*   **自動文字起こし**: OpenAI製の高性能音声認識モデル [Faster Whisper](https://github.com/guillaumekln/faster-whisper) を使用し、GPU活用で高速・高精度にテキスト化します。
+*   **自動文字起こし**: Whisper 系モデルの高速実装 [faster-whisper](https://github.com/guillaumekln/faster-whisper) を使用し、GPU活用で高速・高精度にテキスト化します。
 *   **アーカイブ機能**: 過去の議事録をデータベースに保存し、ブラウザ上で閲覧・Markdown（`.md`）ダウンロード。**保存期限**は **`MM_MINUTES_RETENTION_DAYS`**（既定 **90 日**。環境変数・挙動は下表と設計書 `document/frontend_backend_design.md` §7.1）。
 *   **完全ローカル処理**: データはすべて社内のサーバー内で処理・保存されるため、機密情報が外部に漏れる心配はありません。
 *   **モデル切り替え**: 要約・統合は Ollama（モデル名指定可）または OpenAI API から選択できます。
@@ -51,7 +51,7 @@ cd meeting-minutes-generator
 | **ホスト OS・ハード** | GPU ドライバ、NVIDIA Container Toolkit、十分なディスク（Ollama モデル・Whisper キャッシュ用）。 |
 | **ネットワーク `llm-net`（必須）** | **worker** が外部ネットワーク **`llm-net`** にも参加し、そこにいる **Ollama**（例: コンテナ名 **`ollama-server`**）へ接続します。初回のみ `docker network create llm-net`（未作成時）。Ollama がまだ `llm-net` にいない場合は `docker network connect llm-net <Ollamaのコンテナ名>`。未作成のまま `docker compose up` するとエラーになります。 |
 | **Ollama（別途）** | LLM 用の **Ollama は本 Compose に含めません**。**`llm-net` 上の DNS 名**で届く想定で、ワーカー既定は **`http://ollama-server:11434`**。コンテナ名が違う場合は `.env` の **`OLLAMA_BASE_URL`** で指定してください。 |
-| **ポート（環境依存）** | 既定ではブラウザ **`http://localhost:8085`** で UI にアクセスします。8085 が既に使われている場合は、起動**前**にプロジェクト直下で `.env` を用意し **`MM_FRONTEND_PORT`** を変更してください（`.env.example` 参照）。 |
+| **ポート（環境依存）** | ローカル既定は **`http://localhost:8085`**。**GT-2222 の既定公開 URL は `https://gt-2222/meetingminutesnotebook/`**（`config/gt-2222.env` の `VITE_BASE_PATH` / `VITE_API_BASE`）。8085 が既に使われている場合は、起動**前**にプロジェクト直下で `.env` を用意し **`MM_FRONTEND_PORT`** を変更してください（`.env.example` 参照）。 |
 | **CORS（本番・社内 URL）** | ブラウザから **別ホスト名・HTTPS** で API にアクセスする場合は、起動**前**に **`MM_CORS_ORIGINS`**（カンマ区切り）にそのオリジンを含めてください。ローカルだけなら既定のままで可。 |
 | **Webhook（任意）** | 完了通知を使う場合は **`.env` の `WEBHOOK_URL`** に実 URL を書く（`docker-compose.yml` は `${WEBHOOK_URL}` を参照）。未使用ならプレースホルダのままで可。 |
 | **議事録の保持期限（任意）** | **`MM_MINUTES_RETENTION_DAYS`** … 未指定時 **90**（日）。**0 以下**で自動削除なし。api / worker に渡す（`docker-compose.yml` の **`:-90`**）。 |
@@ -106,13 +106,14 @@ docker exec ollama-server ollama pull qwen2.5:7b
 ※ 未実行だとワーカー側で「model not found」などのエラーになります。UI で別モデルを指定する場合は、その名前で `pull` してください。
 
 ### 5. アプリケーション利用
-ブラウザで次にアクセスします（ポートを変えていなければ 8085）。Nginx 経由で React と `/api` が同一オリジンです。
+ブラウザで次にアクセスします。Nginx 経由で React と `/api` が同一オリジンです。
 
-[http://localhost:8085](http://localhost:8085)
+- **GT-2222（現在の既定）**: [https://gt-2222/meetingminutesnotebook/](https://gt-2222/meetingminutesnotebook/)
+- **ローカル既定**（ポート変更なし）: [http://localhost:8085](http://localhost:8085)
 
 **ブラウザ通知**を使う場合は、左パネルで通知を **ブラウザ** にし、表示に従って **許可** してください。`http://192.168.x.x` 等では通知 API が無効になりやすいので、**HTTPS** 化するか **localhost / 127.0.0.1** で試すか、**Webhook・メール**に切り替えてください。手順・証明書（社内 CA）の詳細は画面の **ヘルプ** を開いてください。
 
-**サブパス配信**（例: `/meetingminutesnotebook/`）では、フロント再ビルド前に **`.env` の `VITE_BASE_PATH` / `VITE_API_BASE`** を実 URL に合わせます（GT-2222 向けは `config/gt-2222.env` 参照。設計・TLS の詳細は `document/frontend_backend_design.md` §11.1、`document/gt2222_https_subpath_troubleshooting.md`）。
+**サブパス配信**（例: `/meetingminutesnotebook/`）では、フロント再ビルド前に **`.env` の `VITE_BASE_PATH` / `VITE_API_BASE`** を実 URL に合わせます（GT-2222 の既定は `VITE_BASE_PATH=/meetingminutesnotebook/` / `VITE_API_BASE=/meetingminutesnotebook`。`config/gt-2222.env` 参照。設計・TLS の詳細は `document/frontend_backend_design.md` §11.1、`document/gt2222_https_subpath_troubleshooting.md`）。
 
 ### 6. ローカル開発（API + フロントのみ）
 
@@ -129,7 +130,8 @@ docker exec ollama-server ollama pull qwen2.5:7b
 * **GT-2222 専用の既定値** … **`config/gt-2222.env`**（`docker ps` に合わせた値。Ollama は別 Docker・ホスト 11434 前提）。`cp config/gt-2222.env .env` で利用。社内ホスト名・Webhook だけ実環境に合わせて編集してください。
 * **汎用テンプレ** … **`.env.example`**
 
-いずれもプロジェクト直下の `.env` に置くと `docker compose` が読み込みます（**手順 2** と内容が対応）。
+いずれもプロジェクト直下の `.env` を `docker compose` が参照します（**手順 2** と内容が対応）。  
+ただし **コンテナに環境変数として渡るのは `docker-compose.yml` の `environment` / `env_file` で指定されたものだけ**です（`.env` は主に `${VAR}` 展開元）。
 
 | 変数 | 用途 |
 |------|------|
@@ -150,6 +152,7 @@ docker exec ollama-server ollama pull qwen2.5:7b
 | `MM_UPLOAD_MAX_BYTES` | API 側のアップロード上限（バイト）。既定 **5 GiB**。Nginx 側上限（`client_max_body_size 5g`）と合わせて運用 |
 | `MM_TASK_SUBMIT_RATE_LIMIT_COUNT` / `MM_TASK_SUBMIT_RATE_LIMIT_WINDOW_SEC` | API の投入レート制限。既定 **60 秒あたり 30 件**（`COUNT=0` で無効） |
 | `MM_UPLOAD_WARN_FREE_GB` / `MM_UPLOAD_MIN_FREE_GB` | `downloads` の空き容量監視閾値（GiB）。既定は警告 **20**、受付拒否 **5** |
+| `MM_OLLAMA_TIMEOUT_SEC` / `MM_OLLAMA_MERGE_TIMEOUT_SEC` | Ollama HTTP タイムアウト秒。既定は通常 **600**、merge は未設定時に通常値を継承 |
 | `MM_EMAIL_NOTIFY_ENABLED` | `1` でメール通知を UI に出す（SMTP 必須）。詳細は `.env.example` |
 | `VITE_BASE_PATH` / `VITE_API_BASE` | 本番フロントビルド時。**サブパス配信**で必須。末尾スラッシュの有無は `VITE_BASE_PATH` のみ（`VITE_API_BASE` は末尾なし推奨） |
 | `VITE_ALT_APP_HOSTNAME` | 任意。通知案内などで **名前付き URL** へのリンクを出すときのホスト名 |

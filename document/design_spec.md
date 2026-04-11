@@ -129,6 +129,7 @@ graph TD
 | :--- | :--- |
 | `users` | ログイン ID（`username`＝正規化メール）、パスワードハッシュ、`is_admin` |
 | **`usage_job_log`** | **利用状況集計用**。ジョブ受付時に 1 行（`task_id` 一意）。**議事録・書き起こし本文・ファイル名文字列は保持しない**。受付時 **`input_bytes`**、完了時 **媒体の長さ・音声抽出／Whisper／LLM の壁時計・書き起こし文字数**等（**`database.update_usage_job_metrics`**。列一覧は **`document/frontend_backend_design.md` §5.2**） |
+| **`usage_guard_events`** | 受付防御イベントの監査ログ（レート制限・容量不足・サイズ超過など） |
 | **`usage_admin_notes`** | 管理者が追記する運用メモ（経営・インフラ訴求用など） |
 
 スキーマ・記録条件の詳細は **`document/frontend_backend_design.md` §5.2**。
@@ -207,8 +208,9 @@ graph TD
     *   `admin.py` … 管理者ユーザー CRUD、**`/api/admin/usage/*`**（利用サマリ・イベント・メモ）
     *   `profile.py` … `/me/llm`（OpenAI 設定）
     *   `presets.py` … プリセット JSON 配信
-    *   `jobs.py` … `POST /tasks`（Celery 投入）
+    *   `jobs.py` … `POST /api/tasks`（Celery 投入）
     *   `records.py` … 一覧・キュー・1件・破棄・エクスポート・summary PATCH
+    *   `feedback.py` … `/api/feedback/*`（エラー報告・目安箱投稿）
 *   `backend/schemas.py`, `backend/deps.py`: Pydantic スキーマ・FastAPI 依存（JWT 管理者等）
 *   `backend/ollama_client.py`: **`OLLAMA_BASE_URL`** 解決、**`/api/tags`**、**`ollama_generate_url`**、**`try_ollama_unload_model`**（**`tasks`** が推論 URL とアンロードに利用。推論の **`requests.post` 本体は `tasks.call_llm`**）
 *   `backend/presets_io.py`: **`presets_builtin.json`** の読込（**`GET /api/presets`** と **Streamlit `app.py`**・**`tasks.py`** のプリセットで共通化）。**`design_review`（設計書レビュー）** プリセットは設計レビュー向けの抽出・統合ヒント用。**手動のレビュー記録テンプレ**は **`document/design_review_template.md`**
@@ -219,7 +221,7 @@ graph TD
 *   `app.py`: Streamlit（レガシー UI。プリセット・プロンプト保存は **`backend.presets_io`** / **`backend.storage`** で API と整合）
 *   `tasks.py`: Celery ワーカー（**`@celery_app.task`** の **`process_video_task`**）。**`call_llm`** が Ollama 時 **`requests.post`**（**`ollama_generate_url`**、**`num_ctx` 4096**、**timeout 600**）。**`extract_json_block`** は本モジュール内関数。**`backend.ollama_client`** の **`try_ollama_unload_model`** をエラー／破棄時に利用（§3.1.1）
 *   `celery_app.py`: Celery アプリ定義（API はここだけ import して `send_task`）
-*   `database.py`: DB 操作ラッパー（認証時は **`registry.db`**（ユーザー・**`usage_job_log` / `usage_admin_notes`**）・ユーザー別 `minutes.db`）
+*   `database.py`: DB 操作ラッパー（認証時は **`registry.db`**（ユーザー・**`usage_job_log` / `usage_guard_events` / `usage_admin_notes`**）・ユーザー別 `minutes.db`）
 *   `pipeline/`: ローカル実行用スクリプト群
 *   `prompts/prompt_extract.txt`, `prompts/prompt_merge.txt`: プロンプトテンプレート
 
