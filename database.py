@@ -55,6 +55,11 @@ def minutes_retention_days() -> int:
     return n
 
 
+def _dt_to_db_text(dt: datetime) -> str:
+    """SQLite 比較用の時刻文字列へ正規化する。"""
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _auth_secret_configured() -> bool:
     return bool((os.getenv("MM_AUTH_SECRET") or "").strip())
 
@@ -215,6 +220,7 @@ def _migrate_usage_job_metrics_columns(conn):
         ("extract_llm_sec", "REAL"),
         ("merge_llm_sec", "REAL"),
         ("llm_chunks", "INTEGER"),
+        ("completion_wall_sec", "REAL"),
     ]
     for col, decl in additions:
         if col not in existing:
@@ -553,7 +559,7 @@ def save_initial_task(
                 email,
                 filename,
                 "pending",
-                datetime.now(),
+                _dt_to_db_text(datetime.now()),
                 topic or "",
                 tags or "",
                 category or "",
@@ -578,14 +584,14 @@ def update_record(task_id, owner: str = "", status=None, transcript=None, summar
                 if old_status == "pending" and status != "pending":
                     conn.execute(
                         "UPDATE records SET processing_started_at = COALESCE(processing_started_at, ?) WHERE id=?",
-                        (now, task_id),
+                        (_dt_to_db_text(now), task_id),
                     )
                 if status == "completed" or status == "cancelled" or (
                     isinstance(status, str) and status.startswith("Error")
                 ):
                     conn.execute(
                         "UPDATE records SET processing_finished_at = ? WHERE id=?",
-                        (now, task_id),
+                        (_dt_to_db_text(now), task_id),
                     )
             conn.execute("UPDATE records SET status=? WHERE id=?", (status, task_id))
         if transcript is not None:
@@ -630,7 +636,7 @@ def purge_expired_minutes_db_path(path: str) -> int:
                   AND created_at < ?
                   AND NOT (status = 'pending' OR status LIKE 'processing%')
                 """,
-                (cutoff,),
+                (_dt_to_db_text(cutoff),),
             )
             ids = [row[0] for row in cur.fetchall()]
             for tid in ids:
@@ -685,7 +691,7 @@ def _recent_records_where_clause(
     category: str,
     status_filter: str,
 ) -> tuple[str, list[Any]]:
-    limit_dt = datetime.now() - timedelta(days=days)
+    limit_dt = _dt_to_db_text(datetime.now() - timedelta(days=days))
     q = (search or "").strip()
     cat = (category or "").strip()
     sf = (status_filter or "").strip()
@@ -760,7 +766,7 @@ def get_recent_records(
 def get_active_queue_records(owner: str = "", days=7, limit=30):
     init_minutes_db(owner)
     purge_expired_minutes_db_path(minutes_db_path(owner))
-    since = datetime.now() - timedelta(days=days)
+    since = _dt_to_db_text(datetime.now() - timedelta(days=days))
     path = minutes_db_path(owner)
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
@@ -776,7 +782,7 @@ def get_active_queue_records(owner: str = "", days=7, limit=30):
         ).fetchall()
 
 
-def _queue_rows_from_minutes_path(path: str, since: datetime) -> list[sqlite3.Row]:
+def _queue_rows_from_minutes_path(path: str, since: str) -> list[sqlite3.Row]:
     if not os.path.isfile(path):
         return []
     purge_expired_minutes_db_path(path)
@@ -797,7 +803,7 @@ def get_active_queue_records_global(viewer: str = "", days: int = 7, limit: int 
     """認証あり運用向け: 全登録ユーザーの DB・レガシー `data/minutes.db`・registry 外の `user_data/*/minutes.db` を走査し、
     待機・処理中を受付時刻順でマージする。各 dict はレコード列に加え `job_owner`（ログイン ID・レガシーは null）と `is_mine` を含む。
     """
-    since = datetime.now() - timedelta(days=days)
+    since = _dt_to_db_text(datetime.now() - timedelta(days=days))
     viewer_n = registry_login_normalize(viewer) if (viewer or "").strip() else ""
 
     pairs: list[tuple[str, sqlite3.Row]] = []
@@ -972,14 +978,16 @@ def update_usage_job_metrics(
     extract_llm_sec: Optional[float] = None,
     merge_llm_sec: Optional[float] = None,
     llm_chunks: Optional[int] = None,
+    completion_wall_sec: Optional[float] = None,
 ) -> None:
     """ジョブ完了時に 1 回更新（認証・registry 有効時のみ）。失敗ジョブは呼ばなくてよい。"""
-    if not _auth_secret_configured():
-        return
     tid = (task_id or "").strip()
     if not tid:
         return
-    init_registry_db()
+    # ワーカー側に MM_AUTH_SECRET が無い環境でも、既存 registry.db があれば完了メトリクス更新は許可する。
+    # （投入時ログは API 側で作成済みだが、更新時だけ早期 return されると全件「未計測」になるため）
+    if _auth_secret_configured():
+        init_registry_db()
     if not os.path.exists(REGISTRY_DB_PATH):
         return
     fields: list[tuple[str, Any]] = []
@@ -999,8 +1007,11 @@ def update_usage_job_metrics(
         fields.append(("merge_llm_sec", float(merge_llm_sec)))
     if llm_chunks is not None:
         fields.append(("llm_chunks", int(llm_chunks)))
+    if completion_wall_sec is not None:
+        fields.append(("completion_wall_sec", float(completion_wall_sec)))
     if not fields:
         return
+    # NULL 上書きを避けるため、渡された項目だけを部分更新する。
     sets = ", ".join(f"{k} = ?" for k, _ in fields)
     vals = [v for _, v in fields] + [tid]
     try:
@@ -1034,6 +1045,18 @@ def _empty_metrics_rollup() -> dict[str, Any]:
         "sum_llm_sec": 0.0,
         "sum_llm_chunks": 0,
     }
+
+
+def _row_opt(row: sqlite3.Row, key: str) -> Any:
+    # スキーマ移行途中の環境でも KeyError を出さずに値を取り出す。
+    return row[key] if key in row.keys() else None
+
+
+def _row_opt_bool(row: sqlite3.Row, key: str) -> Optional[bool]:
+    v = _row_opt(row, key)
+    if v is None:
+        return None
+    return bool(v)
 
 
 def admin_usage_summary(days: int) -> dict[str, Any]:
@@ -1197,11 +1220,12 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
         cur = conn.execute(
             """
             SELECT id, created_at, task_id, user_email, transcript_only, llm_provider, model_name,
-                   whisper_preset, media_kind,
+                   whisper_preset, media_kind, notification_type, has_supplementary_teams, has_supplementary_notes,
                    input_bytes, media_duration_sec, audio_extract_wall_sec, whisper_wall_sec,
-                   transcript_chars, extract_llm_sec, merge_llm_sec, llm_chunks
+                   transcript_chars, extract_llm_sec, merge_llm_sec, llm_chunks, completion_wall_sec
             FROM usage_job_log
             WHERE created_at >= ?
+            -- 同一秒の登録があっても順序が安定するよう id で第2ソートする。
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
@@ -1220,6 +1244,9 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
                     "model_name": row["model_name"] or "",
                     "whisper_preset": row["whisper_preset"] or "",
                     "media_kind": row["media_kind"] or "",
+                    "notification_type": _row_opt(row, "notification_type"),
+                    "has_supplementary_teams": _row_opt_bool(row, "has_supplementary_teams"),
+                    "has_supplementary_notes": _row_opt_bool(row, "has_supplementary_notes"),
                     "input_bytes": row["input_bytes"],
                     "media_duration_sec": row["media_duration_sec"],
                     "audio_extract_wall_sec": row["audio_extract_wall_sec"],
@@ -1228,6 +1255,7 @@ def admin_usage_events(days: int, limit: int = 100, offset: int = 0) -> tuple[li
                     "extract_llm_sec": row["extract_llm_sec"],
                     "merge_llm_sec": row["merge_llm_sec"],
                     "llm_chunks": row["llm_chunks"],
+                    "completion_wall_sec": _row_opt(row, "completion_wall_sec"),
                 }
             )
     return items, total

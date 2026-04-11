@@ -223,6 +223,9 @@ class UsageEventRow(BaseModel):
     model_name: str
     whisper_preset: str
     media_kind: str
+    notification_type: Optional[str] = None
+    has_supplementary_teams: Optional[bool] = None
+    has_supplementary_notes: Optional[bool] = None
     input_bytes: Optional[int] = None
     media_duration_sec: Optional[float] = None
     audio_extract_wall_sec: Optional[float] = None
@@ -231,6 +234,7 @@ class UsageEventRow(BaseModel):
     extract_llm_sec: Optional[float] = None
     merge_llm_sec: Optional[float] = None
     llm_chunks: Optional[int] = None
+    completion_wall_sec: Optional[float] = None
 
 
 class AdminUsageEventsResponse(BaseModel):

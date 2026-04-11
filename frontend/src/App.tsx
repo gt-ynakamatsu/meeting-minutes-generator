@@ -14,10 +14,12 @@ import {
   adminUsageNoteAdd,
   adminUsageNoteDelete,
   adminUsageNotesList,
+  adminUsageSettingsSummary,
   adminUsageSummary,
   bootstrapRequest,
   createTask,
   discardRecord,
+  downloadAdminUsageLogMd,
   downloadExportMinutes,
   downloadExportTranscript,
   downloadExportTranscriptMd,
@@ -39,6 +41,7 @@ import {
   submitErrorReport,
   submitSuggestionBox,
   type AdminUsageSummary,
+  type AdminUsageSettingsSummary,
   type AdminUserRow,
   type AuthMe,
   type AuthStatus,
@@ -56,6 +59,20 @@ const LS_PENDING = "mm_pending_tasks";
 const ARCHIVE_PAGE_SIZE = 10;
 /** ワーカーがエラー破棄したレコードの summary 先頭（一覧の「エラー」フィルタと一致） */
 const TASK_ERROR_SUMMARY_PREFIX = "【処理エラー】";
+/** 管理画面の表示ラベルを一元管理（集計表とイベント表で共用） */
+const NOTIFICATION_TYPE_LABELS: Record<string, string> = {
+  browser: "ブラウザ",
+  webhook: "Webhook",
+  email: "メール",
+  none: "なし",
+};
+const GUARD_EVENT_LABELS: Record<string, string> = {
+  rate_limited: "レート制限",
+  upload_too_large: "サイズ上限超過",
+  disk_low: "空き容量不足",
+};
+const NOTIFICATION_TYPE_KEYS = ["browser", "webhook", "email", "none"] as const;
+const GUARD_EVENT_KEYS = ["rate_limited", "upload_too_large", "disk_low"] as const;
 
 function taskErrorDetailFromSummary(raw: string): string {
   const t = (raw || "").trim();
@@ -1198,9 +1215,11 @@ function AdminUserPanel({ selfEmail }: { selfEmail: string }) {
   );
 }
 
+// 管理ログは 1 回の取得サイズを固定して、段階読み込みでブラウザ負荷を抑える。
 const USAGE_EVENT_PAGE = 50;
 
 function formatUsageBytes(n: number | null | undefined): string {
+  // 管理画面向けに IEC 単位（KiB/MiB）で揃える。
   if (n == null || n < 0 || !Number.isFinite(n)) return "—";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
@@ -1219,14 +1238,30 @@ function formatUsageSeconds(s: number | null | undefined): string {
 }
 
 function formatUsageInt(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
+  if (n == null || !Number.isFinite(n)) return "未計測";
   return String(Math.round(n));
 }
 
 /** 表のセル用（短い秒表示） */
 function formatUsageSecShort(s: number | null | undefined): string {
-  if (s == null || !Number.isFinite(s)) return "—";
-  return `${s.toFixed(1)}秒`;
+  if (s == null || !Number.isFinite(s)) return "未計測";
+  const totalSec = Math.max(0, Math.round(s));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function usageEventProcessingTotalSec(ev: UsageEventRow): number | undefined {
+  const parts = [ev.audio_extract_wall_sec, ev.whisper_wall_sec, ev.extract_llm_sec, ev.merge_llm_sec];
+  let total = 0;
+  let measured = false;
+  for (const part of parts) {
+    if (part == null || !Number.isFinite(part)) continue;
+    total += Math.max(0, part);
+    measured = true;
+  }
+  return measured ? total : undefined;
 }
 
 function CommonCell({
@@ -1332,7 +1367,13 @@ function CountPctCell({
   alignRight?: boolean;
 }) {
   return (
-    <td style={{ textAlign: alignRight ? "right" : "left", padding: "0.35rem 0" }}>
+    <td
+      style={{
+        textAlign: alignRight ? "right" : "left",
+        padding: "0.35rem 0",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
       {children}
     </td>
   );
@@ -1349,7 +1390,13 @@ function CountPctTable({
 }) {
   return (
     <TableScroll>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+      {/* 列幅を固定し、件数/割合の桁ぶれで列がガタつかないようにする */}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", tableLayout: "fixed" }}>
+        <colgroup>
+          <col />
+          <col style={{ width: "7.5rem" }} />
+          <col style={{ width: "7rem" }} />
+        </colgroup>
         <thead>
           <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
             <TableHeaderCell compact>{headerLabel}</TableHeaderCell>
@@ -1491,6 +1538,7 @@ function SuggestionCell({
 function AdminUsagePanel() {
   const [days, setDays] = useState(30);
   const [summary, setSummary] = useState<AdminUsageSummary | null>(null);
+  const [settingsSummary, setSettingsSummary] = useState<AdminUsageSettingsSummary | null>(null);
   const [events, setEvents] = useState<UsageEventRow[]>([]);
   const [eventsTotal, setEventsTotal] = useState(0);
   const [notes, setNotes] = useState<UsageAdminNoteRow[]>([]);
@@ -1500,9 +1548,11 @@ function AdminUsagePanel() {
 
   const loadSummaryAndNotes = useCallback(() => {
     setErr(null);
-    return Promise.all([adminUsageSummary(days), adminUsageNotesList()])
-      .then(([s, n]) => {
+    // サマリ・設定内訳・運用メモを同時取得して、同一期間の表示タイミングを揃える。
+    return Promise.all([adminUsageSummary(days), adminUsageSettingsSummary(days), adminUsageNotesList()])
+      .then(([s, ss, n]) => {
         setSummary(s);
+        setSettingsSummary(ss);
         setNotes(n);
       })
       .catch((e) => {
@@ -1545,6 +1595,53 @@ function AdminUsagePanel() {
     return m[k] || k || "—";
   };
 
+  const notificationTypeLabel = (k: string | null | undefined) => {
+    const key = (k || "").trim().toLowerCase();
+    if (!key) return "—";
+    return NOTIFICATION_TYPE_LABELS[key] || key;
+  };
+
+  const supplementaryLabel = (ev: UsageEventRow) => {
+    const teams = ev.has_supplementary_teams === true;
+    const notes = ev.has_supplementary_notes === true;
+    if (teams && notes) return "Teams+メモ";
+    if (teams) return "Teams";
+    if (notes) return "メモ";
+    if (ev.has_supplementary_teams == null && ev.has_supplementary_notes == null) return "—";
+    return "なし";
+  };
+
+  const guardEventLabel = (k: string) => {
+    return GUARD_EVENT_LABELS[k] || k || "—";
+  };
+
+  const notificationRows = useMemo(() => {
+    const map = new Map((settingsSummary?.notification_breakdown || []).map((x) => [x.value, x]));
+    return NOTIFICATION_TYPE_KEYS.map((key) => {
+      const hit = map.get(key);
+      return {
+        key,
+        label: NOTIFICATION_TYPE_LABELS[key] || key,
+        count: hit?.count ?? 0,
+        pct: hit?.pct ?? 0,
+      };
+    });
+  }, [settingsSummary]);
+
+  const guardEventRows = useMemo(() => {
+    const map = new Map((settingsSummary?.guard_events || []).map((x) => [x.event_type, x.count]));
+    const total = settingsSummary?.total_guard_events || 0;
+    return GUARD_EVENT_KEYS.map((key) => {
+      const count = map.get(key) ?? 0;
+      return {
+        key,
+        label: GUARD_EVENT_LABELS[key] || key,
+        count,
+        pct: total > 0 ? Math.round((count * 1000) / total) / 10 : 0,
+      };
+    });
+  }, [settingsSummary]);
+
   return (
     <>
       <p className="muted" style={{ fontSize: "0.88rem", marginTop: 0 }}>
@@ -1578,6 +1675,17 @@ function AdminUsagePanel() {
           }}
         >
           再読み込み
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => {
+            const now = new Date();
+            const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+            void downloadAdminUsageLogMd(days, `admin_usage_${days}d_${stamp}.md`).catch((e) => alert(String(e)));
+          }}
+        >
+          ログ出力
         </button>
       </div>
 
@@ -1732,6 +1840,47 @@ function AdminUsagePanel() {
               />
             </AdminSection>
           ) : null}
+
+          {settingsSummary ? (
+            <AdminSection
+              title="設定利用の内訳（全部）"
+              hint="通知方式、参考資料の利用率、防御機能の発動件数を同じ期間で表示します。"
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <CountPctTable
+                  headerLabel="通知方式"
+                  rows={notificationRows}
+                />
+                <CountPctTable
+                  headerLabel="参考資料利用"
+                  rows={[
+                    {
+                      key: "teams",
+                      label: "Teams トランスクリプトあり",
+                      count: settingsSummary.supplementary_teams_used.count,
+                      pct: settingsSummary.supplementary_teams_used.pct,
+                    },
+                    {
+                      key: "notes",
+                      label: "担当メモあり",
+                      count: settingsSummary.supplementary_notes_used.count,
+                      pct: settingsSummary.supplementary_notes_used.pct,
+                    },
+                    {
+                      key: "any",
+                      label: "参考資料いずれかあり",
+                      count: settingsSummary.supplementary_any_used.count,
+                      pct: settingsSummary.supplementary_any_used.pct,
+                    },
+                  ]}
+                />
+                <CountPctTable
+                  headerLabel="防御イベント"
+                  rows={guardEventRows}
+                />
+              </div>
+            </AdminSection>
+          ) : null}
         </div>
       ) : (
         <p className="muted">読み込み中…</p>
@@ -1739,7 +1888,7 @@ function AdminUsagePanel() {
 
       <AdminSection
         title="直近の投入イベント"
-        hint="タスク ID・ログイン ID（メール）・設定の要約と、完了後に記録されたメトリクス。本文は含みません。"
+        hint={undefined}
         style={{ marginTop: "1.75rem" }}
       >
         <TableScroll>
@@ -1747,26 +1896,34 @@ function AdminUsagePanel() {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border, #ddd)" }}>
                 <TableHeaderCell>日時</TableHeaderCell>
+                <TableHeaderCell>タスクID</TableHeaderCell>
                 <TableHeaderCell>ユーザー</TableHeaderCell>
                 <TableHeaderCell>パイプライン</TableHeaderCell>
                 <TableHeaderCell>LLM</TableHeaderCell>
                 <TableHeaderCell>モデル</TableHeaderCell>
                 <TableHeaderCell>媒体</TableHeaderCell>
                 <TableHeaderCell>Whisper</TableHeaderCell>
+                <TableHeaderCell>通知</TableHeaderCell>
+                <TableHeaderCell>参考資料</TableHeaderCell>
                 <TableHeaderCell alignRight>入力</TableHeaderCell>
-                <TableHeaderCell alignRight>尺</TableHeaderCell>
+                <TableHeaderCell alignRight>収録時間</TableHeaderCell>
                 <TableHeaderCell alignRight>抽出</TableHeaderCell>
                 <TableHeaderCell alignRight>Whisper時</TableHeaderCell>
                 <TableHeaderCell alignRight>文字</TableHeaderCell>
                 <TableHeaderCell alignRight>LLM抽出</TableHeaderCell>
                 <TableHeaderCell alignRight>LLM結合</TableHeaderCell>
                 <TableHeaderCell alignRight>チャンク</TableHeaderCell>
+                <TableHeaderCell alignRight>完了まで</TableHeaderCell>
+                <TableHeaderCell alignRight>処理合計</TableHeaderCell>
               </tr>
             </thead>
             <tbody>
               {events.map((ev) => (
                 <tr key={`${ev.id}-${ev.task_id}`} style={{ borderBottom: "1px solid var(--border, #eee)" }}>
                   <UsageEventCell nowrap>{ev.created_at}</UsageEventCell>
+                  <UsageEventCell>
+                    <code>{ev.task_id || "—"}</code>
+                  </UsageEventCell>
                   <UsageEventCell>
                     <code>{ev.user_email || "—"}</code>
                   </UsageEventCell>
@@ -1777,14 +1934,18 @@ function AdminUsagePanel() {
                   </UsageEventCell>
                   <UsageEventCell>{mediaKindLabel(ev.media_kind)}</UsageEventCell>
                   <UsageEventCell>{ev.whisper_preset || "—"}</UsageEventCell>
+                  <UsageEventCell>{notificationTypeLabel(ev.notification_type)}</UsageEventCell>
+                  <UsageEventCell>{supplementaryLabel(ev)}</UsageEventCell>
                   <UsageEventMetricCell value={formatUsageBytes(ev.input_bytes ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageSecShort(ev.media_duration_sec ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageSecShort(ev.audio_extract_wall_sec ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageSecShort(ev.whisper_wall_sec ?? undefined)} />
-                  <UsageEventMetricCell value={ev.transcript_chars != null ? ev.transcript_chars.toLocaleString() : "—"} />
+                  <UsageEventMetricCell value={formatUsageInt(ev.transcript_chars ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageSecShort(ev.extract_llm_sec ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageSecShort(ev.merge_llm_sec ?? undefined)} />
                   <UsageEventMetricCell value={formatUsageInt(ev.llm_chunks ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(ev.completion_wall_sec ?? undefined)} />
+                  <UsageEventMetricCell value={formatUsageSecShort(usageEventProcessingTotalSec(ev))} />
                 </tr>
               ))}
             </tbody>

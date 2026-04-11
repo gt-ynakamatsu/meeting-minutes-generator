@@ -202,6 +202,12 @@ def test_admin_usage_endpoints(monkeypatch):
     assert ss.total_guard_events == 2
 
     monkeypatch.setattr(admin.db, "usage_admin_notes_list", lambda: [{"id": 1, "author_email": "a", "body": "b", "created_at": "x"}])
+    md = admin.admin_usage_export_md("admin@example.com", days=7)
+    assert md.media_type.startswith("text/markdown")
+    body = md.body.decode("utf-8")
+    assert "# 管理者ログエクスポート" in body
+    assert "## 直近の投入イベント" in body
+
     notes = admin.admin_usage_notes_list("admin@example.com")
     assert len(notes) == 1
 

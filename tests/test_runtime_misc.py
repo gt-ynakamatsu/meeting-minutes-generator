@@ -10,12 +10,13 @@ from streamlit_app import constants, render, styles, task_status
 
 
 def test_auth_jwt_create_decode(monkeypatch):
-    monkeypatch.setattr(auth_jwt, "auth_secret", lambda: "sec")
+    secret = "test-secret-key-with-sufficient-length-32b"
+    monkeypatch.setattr(auth_jwt, "auth_secret", lambda: secret)
     monkeypatch.setattr(auth_jwt, "token_ttl_hours", lambda: 24 * 365 * 100)
     monkeypatch.setattr(auth_jwt.time, "time", lambda: 1000)
 
     token = auth_jwt.create_access_token("u@example.com")
-    payload_raw = jwt.decode(token, "sec", algorithms=["HS256"], options={"verify_exp": False})
+    payload_raw = jwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
     assert payload_raw["sub"] == "u@example.com"
     payload = auth_jwt.decode_access_token(token)
     assert payload["sub"] == "u@example.com"

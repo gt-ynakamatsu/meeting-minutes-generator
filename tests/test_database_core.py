@@ -152,6 +152,7 @@ def test_context_usage_and_admin_usage_helpers(isolated_db):
         extract_llm_sec=0.5,
         merge_llm_sec=0.4,
         llm_chunks=2,
+        completion_wall_sec=12.3,
     )
 
     summary = db.admin_usage_summary(7)
@@ -159,6 +160,11 @@ def test_context_usage_and_admin_usage_helpers(isolated_db):
     items, total = db.admin_usage_events(7, limit=10, offset=0)
     assert total >= 1
     assert len(items) >= 1
+    assert "task_id" in items[0]
+    assert "notification_type" in items[0]
+    assert "has_supplementary_teams" in items[0]
+    assert "has_supplementary_notes" in items[0]
+    assert "completion_wall_sec" in items[0]
     settings_summary = db.admin_usage_settings_summary(7)
     assert settings_summary["total_submissions"] >= 1
     assert len(settings_summary["notification_breakdown"]) >= 1
@@ -180,11 +186,23 @@ def test_purge_expired_minutes_and_files(isolated_db):
     with sqlite3.connect(path) as conn:
         conn.execute(
             "INSERT INTO records (id, email, filename, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("old1", "a@example.com", "x.mp3", "completed", datetime.now() - timedelta(days=120)),
+            (
+                "old1",
+                "a@example.com",
+                "x.mp3",
+                "completed",
+                (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
         conn.execute(
             "INSERT INTO records (id, email, filename, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("old2", "a@example.com", "x.mp3", "pending", datetime.now() - timedelta(days=120)),
+            (
+                "old2",
+                "a@example.com",
+                "x.mp3",
+                "pending",
+                (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
     os.makedirs("downloads", exist_ok=True)
     with open(os.path.join("downloads", "old1_tmp.bin"), "w", encoding="utf-8") as f:

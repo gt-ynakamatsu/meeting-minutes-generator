@@ -399,6 +399,17 @@ export type AdminUsageSummary = {
   metrics_rollup: UsageMetricsRollup;
 };
 
+export type AdminUsageSettingsSummary = {
+  period_days: number;
+  total_submissions: number;
+  notification_breakdown: { value: string; count: number; pct: number }[];
+  supplementary_teams_used: UsageCountPct;
+  supplementary_notes_used: UsageCountPct;
+  supplementary_any_used: UsageCountPct;
+  guard_events: { event_type: string; count: number }[];
+  total_guard_events: number;
+};
+
 export type UsageEventRow = {
   id: number;
   created_at: string;
@@ -409,6 +420,9 @@ export type UsageEventRow = {
   model_name: string;
   whisper_preset: string;
   media_kind: string;
+  notification_type?: string | null;
+  has_supplementary_teams?: boolean | null;
+  has_supplementary_notes?: boolean | null;
   input_bytes?: number | null;
   media_duration_sec?: number | null;
   audio_extract_wall_sec?: number | null;
@@ -417,6 +431,7 @@ export type UsageEventRow = {
   extract_llm_sec?: number | null;
   merge_llm_sec?: number | null;
   llm_chunks?: number | null;
+  completion_wall_sec?: number | null;
 };
 
 export type UsageAdminNoteRow = {
@@ -445,6 +460,12 @@ export async function adminUsageSummary(days: number): Promise<AdminUsageSummary
   return handle(res);
 }
 
+export async function adminUsageSettingsSummary(days: number): Promise<AdminUsageSettingsSummary> {
+  const q = new URLSearchParams({ days: String(days) });
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/settings-summary?${q.toString()}`);
+  return handle(res);
+}
+
 export async function adminUsageEvents(params: {
   days: number;
   limit?: number;
@@ -455,6 +476,17 @@ export async function adminUsageEvents(params: {
   if (params.offset != null) q.set("offset", String(params.offset));
   const res = await apiFetch(`${PREFIX}/api/admin/usage/events?${q.toString()}`);
   return handle(res);
+}
+
+export async function downloadAdminUsageLogMd(days: number, filename: string): Promise<void> {
+  const q = new URLSearchParams({ days: String(days) });
+  const res = await apiFetch(`${PREFIX}/api/admin/usage/export/md?${q.toString()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  const blob = await res.blob();
+  triggerBlobDownload(blob, filename);
 }
 
 export async function adminUsageNotesList(): Promise<UsageAdminNoteRow[]> {

@@ -639,6 +639,7 @@ def _remove_files(*paths) -> None:
 
 
 def _safe_update_usage_metrics(task_id: str, **kwargs) -> None:
+    # 利用ログ更新失敗で本処理を落とさない（議事録生成の可用性を優先）。
     try:
         db.update_usage_job_metrics(task_id, **kwargs)
     except Exception:
@@ -769,6 +770,28 @@ def _media_duration_sec_from_segments(segments) -> float:
         return 0.0
 
 
+def _build_transcript_only_usage_metrics(
+    *,
+    media_duration_sec: float,
+    audio_extract_wall_sec: float,
+    whisper_wall_sec: float,
+    raw_transcript: str,
+    task_started_at: float,
+) -> dict:
+    """書き起こしのみ完了時に共通で保存するメトリクスを組み立てる。"""
+    # transcript_only では LLM 抽出・統合を走らせないため、関連メトリクスは 0 で固定する。
+    return {
+        "media_duration_sec": media_duration_sec,
+        "audio_extract_wall_sec": audio_extract_wall_sec,
+        "whisper_wall_sec": whisper_wall_sec,
+        "transcript_chars": len(raw_transcript),
+        "extract_llm_sec": 0.0,
+        "merge_llm_sec": 0.0,
+        "llm_chunks": 0,
+        "completion_wall_sec": time.perf_counter() - task_started_at,
+    }
+
+
 def _inject_supplementary_merge(shell: str, sup_fill: str, sup_body: str) -> str:
     if "{SUPPLEMENTARY_REFERENCE}" in shell:
         return shell.replace("{SUPPLEMENTARY_REFERENCE}", sup_fill)
@@ -810,6 +833,7 @@ def _finish_transcript_only_task(
         extract_llm_sec=um.get("extract_llm_sec"),
         merge_llm_sec=um.get("merge_llm_sec"),
         llm_chunks=um.get("llm_chunks"),
+        completion_wall_sec=um.get("completion_wall_sec"),
     )
     summary_md = (
         "## 書き起こしのみ完了\n\n"
@@ -856,6 +880,8 @@ def process_video_task(
         return
 
     audio_path = os.path.join("downloads", f"{uuid.uuid4()}.mp3")
+    # 「投入から完了まで」の実時間を計測し、管理画面の運用指標に使う。
+    task_started_at = time.perf_counter()
 
     prompt_extract, prompt_merge = _load_prompt_templates(prompt_paths)
     extract_shell, merge_shell, preset_ex = _build_prompt_shells(record, prompt_extract, prompt_merge)
@@ -914,15 +940,13 @@ def process_video_task(
                     notification_type,
                     llm_config,
                     ollama_model,
-                    usage_metrics={
-                        "media_duration_sec": media_duration_sec,
-                        "audio_extract_wall_sec": 0.0,
-                        "whisper_wall_sec": 0.0,
-                        "transcript_chars": len(raw_transcript),
-                        "extract_llm_sec": 0.0,
-                        "merge_llm_sec": 0.0,
-                        "llm_chunks": 0,
-                    },
+                    usage_metrics=_build_transcript_only_usage_metrics(
+                        media_duration_sec=media_duration_sec,
+                        audio_extract_wall_sec=0.0,
+                        whisper_wall_sec=0.0,
+                        raw_transcript=raw_transcript,
+                        task_started_at=task_started_at,
+                    ),
                 )
                 return
         else:
@@ -1006,15 +1030,13 @@ def process_video_task(
                     notification_type,
                     llm_config,
                     ollama_model,
-                    usage_metrics={
-                        "media_duration_sec": media_duration_sec,
-                        "audio_extract_wall_sec": audio_extract_sec,
-                        "whisper_wall_sec": whisper_sec,
-                        "transcript_chars": len(raw_transcript),
-                        "extract_llm_sec": 0.0,
-                        "merge_llm_sec": 0.0,
-                        "llm_chunks": 0,
-                    },
+                    usage_metrics=_build_transcript_only_usage_metrics(
+                        media_duration_sec=media_duration_sec,
+                        audio_extract_wall_sec=audio_extract_sec,
+                        whisper_wall_sec=whisper_sec,
+                        raw_transcript=raw_transcript,
+                        task_started_at=task_started_at,
+                    ),
                 )
                 return
 
@@ -1164,6 +1186,7 @@ def process_video_task(
             extract_llm_sec=extract_llm_sec,
             merge_llm_sec=merge_llm_sec,
             llm_chunks=total_chunks,
+            completion_wall_sec=time.perf_counter() - task_started_at,
         )
 
         db.update_record(task_id, owner_username or "", status="completed", summary=final_summary)
